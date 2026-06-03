@@ -7,13 +7,7 @@ Workyard is an agent-first remote development runner. It syncs a local project t
 
 ## Install
 
-Install from a release:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/jackbelluche/workyard/main/scripts/install.sh | sh
-```
-
-For local development from this checkout on macOS:
+For the current private repository, clone over SSH and run the local macOS installer:
 
 ```sh
 git clone git@github.com:jbelluche/workyard.git
@@ -353,13 +347,13 @@ checksums.txt
 manifest.json
 ```
 
-End-user install script:
+End-user install script, once releases are published from a public or otherwise accessible repository:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jackbelluche/workyard/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | sh
 ```
 
-For private releases, set `WORKYARD_REPO`, `WORKYARD_VERSION`, or `WORKYARD_INSTALL_DIR` before running the script. Homebrew formulas can reference the tarball URL and matching SHA-256 from `checksums.txt`.
+Set `WORKYARD_REPO`, `WORKYARD_VERSION`, or `WORKYARD_INSTALL_DIR` before running the script when installing from a non-default release location. Homebrew formulas can reference the tarball URL and matching SHA-256 from `checksums.txt`.
 
 ## Command Reference
 
