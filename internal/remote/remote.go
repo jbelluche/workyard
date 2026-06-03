@@ -94,6 +94,19 @@ func BuildPaths(home, remoteRoot, projectName, run string) (Paths, error) {
 	}, nil
 }
 
+func DaemonPaths(home, remoteBinary string) (Paths, error) {
+	binary, err := installDestination(home, remoteBinary)
+	if err != nil {
+		return Paths{}, err
+	}
+	return Paths{
+		Home:      home,
+		DaemonDir: path.Join(home, ".workyard", "daemon"),
+		Socket:    path.Join(home, ".workyard", "daemon", "workyard.sock"),
+		Binary:    binary,
+	}, nil
+}
+
 func normalizeRoot(home, root string) string {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -189,10 +202,7 @@ func Stream(ctx context.Context, worker string, argv []string, stdin io.Reader, 
 }
 
 func EnsureDaemon(ctx context.Context, workerHost string, paths Paths, overrideBinary string) error {
-	binary := paths.Binary
-	if overrideBinary != "" {
-		binary = overrideBinary
-	}
+	binary := daemonBinary(paths, overrideBinary)
 	ping := []string{binary, "daemonctl", "ping", "--socket", paths.Socket, "--json"}
 	if _, err := Run(ctx, workerHost, ping, nil, 5*time.Second); err == nil {
 		return nil
@@ -205,7 +215,7 @@ func EnsureDaemon(ctx context.Context, workerHost string, paths Paths, overrideB
 	if _, err := Run(ctx, workerHost, []string{"sh", "-lc", script}, nil, 10*time.Second); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	var last error
 	for time.Now().Before(deadline) {
 		if _, err := Run(ctx, workerHost, ping, nil, 3*time.Second); err == nil {
@@ -216,6 +226,76 @@ func EnsureDaemon(ctx context.Context, workerHost string, paths Paths, overrideB
 		time.Sleep(300 * time.Millisecond)
 	}
 	return last
+}
+
+func RestartDaemon(ctx context.Context, workerHost string, paths Paths, overrideBinary string) error {
+	if err := StopDaemon(ctx, workerHost, paths, overrideBinary); err != nil {
+		return err
+	}
+	return EnsureDaemon(ctx, workerHost, paths, overrideBinary)
+}
+
+func StopDaemon(ctx context.Context, workerHost string, paths Paths, overrideBinary string) error {
+	binary := daemonBinary(paths, overrideBinary)
+	ping := []string{binary, "daemonctl", "ping", "--socket", paths.Socket, "--json"}
+	if _, err := Run(ctx, workerHost, ping, nil, 5*time.Second); err != nil {
+		return nil
+	}
+	shutdown := []string{binary, "daemonctl", "shutdown", "--socket", paths.Socket, "--json"}
+	if _, err := Run(ctx, workerHost, shutdown, nil, 10*time.Second); err != nil {
+		if forceErr := forceStopDaemon(ctx, workerHost, paths); forceErr != nil {
+			return fmt.Errorf("graceful daemon shutdown failed: %w; forced daemon stop failed: %v", err, forceErr)
+		}
+	}
+	return waitUntilDaemonStopped(ctx, workerHost, ping)
+}
+
+func waitUntilDaemonStopped(ctx context.Context, workerHost string, ping []string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		if _, err := Run(ctx, workerHost, ping, nil, 3*time.Second); err != nil {
+			return nil
+		} else {
+			last = err
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if last != nil {
+		return last
+	}
+	return fmt.Errorf("daemon did not stop")
+}
+
+func forceStopDaemon(ctx context.Context, workerHost string, paths Paths) error {
+	_, err := Run(ctx, workerHost, []string{"sh", "-lc", forceStopDaemonScript(paths)}, nil, 12*time.Second)
+	return err
+}
+
+func forceStopDaemonScript(paths Paths) string {
+	lock := path.Join(paths.DaemonDir, "daemon.lock")
+	return strings.Join([]string{
+		"set -eu",
+		"lock=" + ShellQuote(lock),
+		"socket=" + ShellQuote(paths.Socket),
+		"if [ -L \"$lock\" ] || [ -L \"$socket\" ]; then printf 'refusing symlink daemon lock or socket\\n' >&2; exit 1; fi",
+		"if [ ! -f \"$lock\" ]; then exit 0; fi",
+		"pid=$(cat \"$lock\")",
+		"case \"$pid\" in ''|*[!0-9]*) printf 'invalid daemon pid in %s\\n' \"$lock\" >&2; exit 1;; esac",
+		"if ! kill -0 \"$pid\" 2>/dev/null; then exit 0; fi",
+		"cmd=$(ps -p \"$pid\" -o args= || true)",
+		"case \"$cmd\" in *'workyard daemon'*\"$socket\"*) ;; *) printf 'refusing to stop unrecognized daemon pid %s: %s\\n' \"$pid\" \"$cmd\" >&2; exit 1;; esac",
+		"kill -TERM \"$pid\"",
+		"i=0",
+		"while kill -0 \"$pid\" 2>/dev/null; do i=$((i+1)); if [ \"$i\" -ge 40 ]; then kill -KILL \"$pid\"; break; fi; sleep 0.2; done",
+	}, "\n")
+}
+
+func daemonBinary(paths Paths, overrideBinary string) string {
+	if overrideBinary != "" {
+		return overrideBinary
+	}
+	return paths.Binary
 }
 
 func ShellQuote(s string) string {

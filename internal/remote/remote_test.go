@@ -1,6 +1,9 @@
 package remote
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildPathsRejectsRemoteRootOutsideWorkyardRuns(t *testing.T) {
 	if _, err := BuildPaths("/home/jack", "/tmp/workyard", "project", "run"); err == nil {
@@ -60,6 +63,46 @@ func TestInstallDestinationStaysUnderWorkyardBin(t *testing.T) {
 	}
 	if _, err := installDestination("/home/jack", "/tmp/workyard"); err == nil {
 		t.Fatal("expected outside install destination to be rejected")
+	}
+}
+
+func TestDaemonPathsUseWorkyardDaemonAndInstalledBinary(t *testing.T) {
+	paths, err := DaemonPaths("/home/jack", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.Socket != "/home/jack/.workyard/daemon/workyard.sock" {
+		t.Fatalf("socket=%s", paths.Socket)
+	}
+	if paths.Binary != "/home/jack/.workyard/bin/workyard" {
+		t.Fatalf("binary=%s", paths.Binary)
+	}
+}
+
+func TestDaemonPathsRejectBinaryOutsideWorkyardBin(t *testing.T) {
+	if _, err := DaemonPaths("/home/jack", "/tmp/workyard"); err == nil {
+		t.Fatal("expected outside daemon binary to be rejected")
+	}
+}
+
+func TestForceStopDaemonScriptUsesLockAndSocketGuards(t *testing.T) {
+	paths := Paths{
+		DaemonDir: "/home/jack/.workyard/daemon",
+		Socket:    "/home/jack/.workyard/daemon/workyard.sock",
+	}
+	script := forceStopDaemonScript(paths)
+	for _, want := range []string{
+		"daemon.lock",
+		"refusing symlink daemon lock or socket",
+		"invalid daemon pid",
+		"workyard daemon",
+		"$socket",
+		"kill -TERM",
+		"kill -KILL",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("force stop script missing %q:\n%s", want, script)
+		}
 	}
 }
 

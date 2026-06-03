@@ -102,23 +102,34 @@ Validate the config:
 workyard config check
 ```
 
-Sync to a worker:
+Deploy everything to a worker:
+
+```sh
+workyard deploy . --worker user@worker-host
+```
+
+Deploy from any project path or config path:
+
+```sh
+workyard deploy /path/to/project --worker user@worker-host
+workyard deploy /path/to/project/workyard.yaml --worker user@worker-host
+```
+
+Deploy from a clean remote run directory:
+
+```sh
+workyard deploy /path/to/project --worker user@worker-host --fresh
+```
+
+`deploy` runs `doctor`, `sync`, `setup`, `build`, relaunches services, waits for healthy services, and prints the active URLs. Add `--install` when you want it to install or upgrade the worker binary first; deploy restarts the worker daemon after installing so the new binary is active.
+
+You can still run individual lower-level commands:
 
 ```sh
 workyard --worker user@worker-host sync
-```
-
-Run project lifecycle hooks:
-
-```sh
 workyard --worker user@worker-host setup
 workyard --worker user@worker-host build
-```
-
-Start services:
-
-```sh
-workyard --worker user@worker-host start
+workyard --worker user@worker-host start web
 ```
 
 Inspect status and URLs:
@@ -127,6 +138,15 @@ Inspect status and URLs:
 workyard --worker user@worker-host status
 workyard --worker user@worker-host urls
 workyard --worker user@worker-host inspect
+```
+
+For local fixture/dev runs without `--worker`, Workyard uses a private background daemon on your machine and prepares a local managed run under `~/.workyard/runs`:
+
+```sh
+workyard daemon start
+workyard build
+workyard daemon status
+workyard daemon stop
 ```
 
 Read logs and events:
@@ -277,7 +297,7 @@ The old `command` service field is not supported. Use `startCommand`.
 
 Workyard treats `.env` files as sensitive inputs. By default, sync excludes `.env`, `.env.local`, and `.env.*.local`; set `sync.includeEnvFiles: true` only for fixtures or worker environments where those files are intentionally copied. Workyard never edits `.env` files to resolve port conflicts. Assigned ports are injected into process environments through `WORKYARD_PORT` and the configured `port.env` name.
 
-Daemon control stays on a private Unix socket under `~/.workyard/daemon`, remote commands run over SSH, and logs are read through bounded commands unless `logs --follow` is explicitly requested. Log and inspect output redacts common secret shapes such as `TOKEN=value`, `api_key: value`, bearer tokens, and URL credentials, but redaction is a safety net rather than a reason to print secrets.
+Daemon control stays on a private Unix socket under `~/.workyard/daemon`, remote commands run over SSH, and local commands can start the local daemon in the background with `workyard daemon start`. Stop it with `workyard daemon stop`, and check it with `workyard daemon status`. Logs are read through bounded commands unless `logs --follow` is explicitly requested. Log and inspect output redacts common secret shapes such as `TOKEN=value`, `api_key: value`, bearer tokens, and URL credentials, but redaction is a safety net rather than a reason to print secrets.
 
 ## Watch Mode
 
@@ -364,6 +384,7 @@ workyard init
 workyard doctor
 workyard config check
 workyard services
+workyard deploy . --worker user@worker-host
 workyard sync
 workyard setup
 workyard build
@@ -434,10 +455,7 @@ workyard --project fixtures/health-server services
 With a worker:
 
 ```sh
-workyard --project fixtures/health-server --worker user@worker-host sync
-workyard --project fixtures/health-server --worker user@worker-host setup
-workyard --project fixtures/health-server --worker user@worker-host build
-workyard --project fixtures/health-server --worker user@worker-host start web
+workyard deploy fixtures/health-server --worker user@worker-host --fresh
 workyard --project fixtures/health-server --worker user@worker-host status
 workyard --project fixtures/health-server --worker user@worker-host stop --all
 ```

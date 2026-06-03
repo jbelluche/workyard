@@ -21,9 +21,11 @@ type DaemonOptions struct {
 }
 
 type Daemon struct {
-	opts      DaemonOptions
-	mu        sync.Mutex
-	processes map[string]*os.Process
+	opts         DaemonOptions
+	mu           sync.Mutex
+	processes    map[string]*os.Process
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 func Serve(ctx context.Context, opts DaemonOptions) error {
@@ -69,19 +71,30 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 	if err := os.Chmod(opts.Socket, 0o600); err != nil {
 		return err
 	}
-	d := &Daemon{opts: opts, processes: map[string]*os.Process{}}
+	d := &Daemon{opts: opts, processes: map[string]*os.Process{}, shutdown: make(chan struct{})}
 	if err := d.recoverServices(); err != nil {
 		return err
 	}
 	defer d.shutdownServices(5 * time.Second)
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-d.shutdown:
+		}
 		_ = ln.Close()
 	}()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
+				return nil
+			}
+			select {
+			case <-d.shutdown:
+				return nil
+			default:
+			}
+			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
 			return err
@@ -343,6 +356,12 @@ func (d *Daemon) handle(conn net.Conn) {
 }
 
 func (d *Daemon) dispatch(req Request) Response {
+	if req.Action == "shutdown" {
+		d.shutdownOnce.Do(func() {
+			close(d.shutdown)
+		})
+		return Response{OK: true, Message: "daemon stopping"}
+	}
 	validated, err := d.validateRequest(req)
 	if err != nil {
 		return errorResponse("RUN_ROOT_INVALID", err.Error(), "Use a Workyard-managed run under ~/.workyard/runs/<project>/<run>")

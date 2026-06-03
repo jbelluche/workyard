@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,6 +109,75 @@ func TestDaemonShutdownStopsRecoveredServices(t *testing.T) {
 	web := st.Services["web"]
 	if web.Status != "stopped" || web.PID != 0 || web.Healthy {
 		t.Fatalf("unexpected stopped service state: %#v", web)
+	}
+}
+
+func TestDaemonDispatchShutdownClosesChannel(t *testing.T) {
+	d := &Daemon{shutdown: make(chan struct{})}
+	res := d.dispatch(Request{Action: "shutdown"})
+	if !res.OK {
+		t.Fatalf("expected shutdown response ok: %#v", res)
+	}
+	select {
+	case <-d.shutdown:
+	case <-time.After(time.Second):
+		t.Fatal("expected shutdown channel to close")
+	}
+	res = d.dispatch(Request{Action: "shutdown"})
+	if !res.OK {
+		t.Fatalf("expected repeated shutdown response ok: %#v", res)
+	}
+}
+
+func TestServeShutdownReturnsNil(t *testing.T) {
+	stateDir, err := os.MkdirTemp("/tmp", "workyard-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+	socket, err := managedSocketPath(stateDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Serve(ctx, DaemonOptions{StateDir: stateDir, AllowRoot: true})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for {
+		if _, err := Call(socket, Request{Action: "ping"}); err == nil {
+			break
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			select {
+			case err := <-errCh:
+				t.Fatalf("daemon exited before becoming ready: %v", err)
+			default:
+			}
+			t.Fatalf("daemon did not become ready: %v", lastErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	res, err := Call(socket, Request{Action: "shutdown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK {
+		t.Fatalf("expected shutdown response ok: %#v", res)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Serve returned error on shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon did not stop")
 	}
 }
 

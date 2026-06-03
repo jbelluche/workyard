@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackbelluche/workyard/internal/config"
@@ -39,6 +41,12 @@ type options struct {
 	remoteBinary string
 	socket       string
 	stateDir     string
+}
+
+type daemonLaunchResult struct {
+	PID    int
+	Socket string
+	Log    string
 }
 
 type printedError struct {
@@ -107,6 +115,7 @@ func newRoot(opts *options) *cobra.Command {
 	root.AddCommand(doctorCommand(opts))
 	root.AddCommand(configCommand(opts))
 	root.AddCommand(servicesCommand(opts))
+	root.AddCommand(deployCommand(opts))
 	root.AddCommand(syncCommand(opts))
 	root.AddCommand(installCommand(opts))
 	root.AddCommand(daemonCommand(opts))
@@ -713,6 +722,386 @@ func servicesCommand(opts *options) *cobra.Command {
 	}
 }
 
+type deployOptions struct {
+	install     bool
+	fresh       bool
+	skipDoctor  bool
+	skipSetup   bool
+	skipBuild   bool
+	skipWait    bool
+	timeout     string
+	artifactDir string
+	localBinary string
+}
+
+type deployStep struct {
+	Name    string `json:"name"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
+}
+
+func deployCommand(opts *options) *cobra.Command {
+	var d deployOptions
+	cmd := &cobra.Command{
+		Use:   "deploy [project-path|workyard.yaml] [service...]",
+		Short: "Deploy a project to a worker",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDeploy(cmd, opts, d, args)
+		},
+	}
+	cmd.Flags().BoolVar(&d.install, "install", false, "install or upgrade the remote worker binary before deploying")
+	cmd.Flags().BoolVar(&d.fresh, "fresh", false, "remove the existing managed run before deploying")
+	cmd.Flags().BoolVar(&d.skipDoctor, "skip-doctor", false, "skip preflight doctor checks")
+	cmd.Flags().BoolVar(&d.skipSetup, "skip-setup", false, "skip project setup")
+	cmd.Flags().BoolVar(&d.skipBuild, "skip-build", false, "skip project build")
+	cmd.Flags().BoolVar(&d.skipWait, "skip-wait", false, "skip waiting for healthy services")
+	cmd.Flags().StringVar(&d.timeout, "timeout", "60s", "health wait timeout")
+	cmd.Flags().StringVar(&d.artifactDir, "artifact-dir", "dist", "directory containing workyard-<os>-<arch> artifacts")
+	cmd.Flags().StringVar(&d.localBinary, "local-binary", "", "specific local binary to upload when --install is set")
+	return cmd
+}
+
+func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string) error {
+	if opts.worker == "" {
+		return output.NewError("WORKER_REQUIRED", "--worker is required for deploy", "")
+	}
+	project, services, err := deployProjectAndServices(opts.project, args)
+	if err != nil {
+		return output.NewError("DEPLOY_ARGS_INVALID", err.Error(), "")
+	}
+	loaded, err := config.Load(project)
+	if err != nil {
+		return output.NewError("CONFIG_LOAD_FAILED", err.Error(), "")
+	}
+	for _, name := range services {
+		if _, ok := loaded.Config.Services[name]; !ok {
+			return output.NewError("SERVICE_SELECTION_FAILED", fmt.Sprintf("unknown service %q", name), "")
+		}
+	}
+	waitServices := services
+	if len(waitServices) == 0 {
+		waitServices = config.ServiceNames(loaded.Config.Services)
+	}
+	run := opts.run
+	if run == "" {
+		run = runid.Default(loaded.Config.Root)
+	}
+	run, err = runid.Validate(run)
+	if err != nil {
+		return output.NewError("RUN_ID_INVALID", err.Error(), "")
+	}
+	steps := []deployStep{}
+	step := func(name, message string) {
+		steps = append(steps, deployStep{Name: name, OK: true, Message: message})
+		if !opts.quiet && !opts.json {
+			if message == "" {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "ok: %s\n", name)
+			} else {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "ok: %s - %s\n", name, message)
+			}
+		}
+	}
+	if !opts.quiet && !opts.json {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "deploying %s to %s run=%s\n", loaded.Config.Name, opts.worker, run)
+	}
+	home, err := remote.Home(cmd.Context(), opts.worker)
+	if err != nil {
+		return output.NewError("SSH_FAILED", err.Error(), "Check Tailscale/SSH connectivity to the worker")
+	}
+	paths, err := remote.BuildPaths(home, opts.remoteRoot, loaded.Config.Name, run)
+	if err != nil {
+		return output.NewError("REMOTE_PATH_INVALID", err.Error(), "")
+	}
+	if d.install {
+		res, err := deployInstall(cmd, opts, d, paths)
+		if err != nil {
+			return err
+		}
+		message := res.InstalledVersion
+		if res.DaemonRestarted {
+			message += "; daemon restarted"
+		}
+		step("install", message)
+	}
+	if !d.skipDoctor {
+		report := doctor.Run(cmd.Context(), doctor.Options{
+			Project:      loaded.Config.Root,
+			Worker:       opts.worker,
+			RemoteRoot:   opts.remoteRoot,
+			RemoteBinary: opts.remoteBinary,
+			Version:      Version,
+			CheckProject: true,
+			Timeout:      8 * time.Second,
+		}, doctor.SystemRunner{})
+		if !report.OK {
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": false, "failedStep": "doctor", "doctor": report, "steps": steps})
+			}
+			printDoctorReport(cmd.OutOrStdout(), report)
+			return printedError{err: errors.New("doctor found required check failures"), exitCode: 1}
+		}
+		step("doctor", "required checks passed")
+	}
+	if d.fresh {
+		removed, err := deployFresh(cmd, opts, paths, run)
+		if err != nil {
+			return err
+		}
+		if removed {
+			step("fresh", "removed existing run")
+		} else {
+			step("fresh", "no existing run")
+		}
+	}
+	syncRes, err := syncer.Run(cmd.Context(), loaded, syncer.Options{
+		Worker:     opts.worker,
+		RunID:      run,
+		RemoteRoot: opts.remoteRoot,
+		Delete:     true,
+		Verbose:    opts.verbose,
+	}, Version)
+	if err != nil {
+		return output.NewError("SYNC_FAILED", err.Error(), "Check SSH access and run workyard sync with --verbose")
+	}
+	rememberRun(cmd.ErrOrStderr(), opts, loaded, registry.RunRef{
+		Worker:           syncRes.Worker,
+		Project:          syncRes.Project,
+		RunID:            syncRes.RunID,
+		RemoteRoot:       opts.remoteRoot,
+		RemoteRunPath:    syncRes.RemoteRunPath,
+		RemoteSourcePath: syncRes.RemoteSourcePath,
+		RemoteBinary:     opts.remoteBinary,
+		LocalRoot:        loaded.Config.Root,
+		ConfigPath:       loaded.Config.Path,
+	})
+	step("sync", syncRes.RemoteSourcePath)
+	if !d.skipSetup {
+		res, err := remoteDaemonCall(cmd.Context(), opts, paths, "setup", nil, controlExtra{})
+		if err != nil {
+			return output.NewError("SETUP_FAILED", err.Error(), "Run workyard events --json or logs setup")
+		}
+		step("setup", res.Message)
+	}
+	if !d.skipBuild {
+		res, err := remoteDaemonCall(cmd.Context(), opts, paths, "build", nil, controlExtra{})
+		if err != nil {
+			return output.NewError("BUILD_FAILED", err.Error(), "Run workyard events --json or logs build")
+		}
+		step("build", res.Message)
+	}
+	stopExtra := controlExtra{}
+	if len(services) == 0 {
+		stopExtra.All = true
+	}
+	if res, err := remoteDaemonCall(cmd.Context(), opts, paths, "stop", services, stopExtra); err == nil {
+		step("stop", serviceStatusSummary(res.Services))
+	} else if opts.verbose && !opts.json {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before start skipped: %s\n", err)
+	}
+	startRes, err := remoteDaemonCall(cmd.Context(), opts, paths, "start", services, controlExtra{})
+	if err != nil {
+		return output.NewError("START_FAILED", err.Error(), "Run workyard inspect --json or logs <service>")
+	}
+	step("start", serviceStatusSummary(startRes.Services))
+	if !d.skipWait && len(waitServices) > 0 {
+		res, err := remoteDaemonCall(cmd.Context(), opts, paths, "wait", waitServices, controlExtra{Healthy: true, Timeout: d.timeout})
+		if err != nil {
+			return output.NewError("WAIT_FAILED", err.Error(), "Run workyard inspect --json")
+		}
+		step("wait", res.Message)
+	}
+	urlsRes, err := remoteDaemonCall(cmd.Context(), opts, paths, "urls", services, controlExtra{})
+	if err != nil {
+		return output.NewError("URLS_FAILED", err.Error(), "Run workyard status --json")
+	}
+	step("urls", fmt.Sprintf("%d url(s)", len(urlsRes.URLs)))
+	if opts.json {
+		return output.WriteJSON(cmd.OutOrStdout(), map[string]any{
+			"ok":               true,
+			"worker":           opts.worker,
+			"project":          paths.Project,
+			"runId":            paths.RunID,
+			"remoteRunPath":    paths.RunRoot,
+			"remoteSourcePath": paths.Source,
+			"services":         urlsRes.Services,
+			"urls":             urlsRes.URLs,
+			"steps":            steps,
+		})
+	}
+	printDeployURLs(cmd.OutOrStdout(), urlsRes.URLs)
+	return nil
+}
+
+func deployInstall(cmd *cobra.Command, opts *options, d deployOptions, paths remote.Paths) (remote.InstallResult, error) {
+	platform, err := remote.DetectPlatform(cmd.Context(), opts.worker)
+	if err != nil {
+		return remote.InstallResult{}, output.NewError("WORKER_PLATFORM_FAILED", err.Error(), "Check SSH access and worker OS/architecture")
+	}
+	binary := d.localBinary
+	if binary == "" {
+		binary = filepath.Join(d.artifactDir, platform.ArtifactName())
+	}
+	res, err := remote.InstallBinary(cmd.Context(), opts.worker, platform, remote.InstallOptions{
+		LocalBinary:     binary,
+		RemoteBinary:    opts.remoteBinary,
+		ExpectedVersion: Version,
+	})
+	if err != nil {
+		return remote.InstallResult{}, output.NewError("WORKER_INSTALL_FAILED", err.Error(), "Build the matching artifact first, for example GOOS="+platform.OS+" GOARCH="+platform.Arch+" go build -o "+binary+" ./cmd/workyard")
+	}
+	paths.Binary = res.RemoteBinary
+	if err := remote.RestartDaemon(cmd.Context(), opts.worker, paths, ""); err != nil {
+		return remote.InstallResult{}, output.NewError("WORKER_DAEMON_RESTART_FAILED", err.Error(), "Check ~/.workyard/daemon/daemon.log on the worker")
+	}
+	res.DaemonRestarted = true
+	return res, nil
+}
+
+func deployFresh(cmd *cobra.Command, opts *options, paths remote.Paths, run string) (bool, error) {
+	exists, err := remoteRunExists(cmd.Context(), opts.worker, paths)
+	if err != nil {
+		return false, output.NewError("REMOTE_RUN_CHECK_FAILED", err.Error(), "")
+	}
+	if !exists {
+		return false, nil
+	}
+	if !opts.quiet && !opts.json {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "fresh: removing existing run %s\n", paths.RunRoot)
+	}
+	if _, err := remoteDaemonCall(cmd.Context(), opts, paths, "stop", nil, controlExtra{All: true}); err != nil {
+		if !opts.quiet {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before fresh cleanup failed: %s\n", err)
+		}
+	}
+	if _, err := remote.CleanupRun(cmd.Context(), opts.worker, paths); err != nil {
+		return false, output.NewError("REMOTE_RUN_CLEANUP_FAILED", err.Error(), "")
+	}
+	store := registry.New(registry.DefaultPath(opts.stateDir))
+	_, _ = store.Remove(opts.worker, paths.Project, run)
+	return true, nil
+}
+
+func remoteRunExists(ctx context.Context, worker string, paths remote.Paths) (bool, error) {
+	script := strings.Join([]string{
+		"set -eu",
+		"run=" + remote.ShellQuote(paths.RunRoot),
+		"if [ -L \"$run\" ]; then printf 'refusing symlink run path\\n' >&2; exit 2; fi",
+		"if [ -d \"$run\" ]; then printf 'exists\\n'; else printf 'missing\\n'; fi",
+	}, "\n")
+	res, err := remote.Run(ctx, worker, []string{"sh", "-lc", script}, nil, 15*time.Second)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(res.Stdout) == "exists", nil
+}
+
+func remoteDaemonCall(ctx context.Context, opts *options, paths remote.Paths, action string, services []string, extra controlExtra) (worker.Response, error) {
+	if err := remote.EnsureDaemon(ctx, opts.worker, paths, opts.remoteBinary); err != nil {
+		return worker.Response{}, err
+	}
+	binary := paths.Binary
+	if opts.remoteBinary != "" {
+		binary = opts.remoteBinary
+	}
+	argv := []string{binary, "daemonctl", action, "--socket", paths.Socket, "--run-root", paths.RunRoot, "--project-name", paths.Project, "--run-id", paths.RunID, "--worker-name", opts.worker, "--json"}
+	if extra.All {
+		argv = append(argv, "--all")
+	}
+	if extra.Tail > 0 {
+		argv = append(argv, "--tail", fmt.Sprint(extra.Tail))
+	}
+	if extra.MaxBytes > 0 {
+		argv = append(argv, "--max-bytes", fmt.Sprint(extra.MaxBytes))
+	}
+	if extra.Stream != "" {
+		argv = append(argv, "--stream", extra.Stream)
+	}
+	if extra.Healthy {
+		argv = append(argv, "--healthy")
+	}
+	if extra.Status != "" {
+		argv = append(argv, "--status", extra.Status)
+	}
+	if extra.Timeout != "" {
+		argv = append(argv, "--timeout", extra.Timeout)
+	}
+	argv = append(argv, services...)
+	out, err := remote.Run(ctx, opts.worker, argv, nil, remoteTimeout(action, extra.Timeout))
+	if err != nil {
+		return worker.Response{}, err
+	}
+	var res worker.Response
+	if err := json.Unmarshal([]byte(out.Stdout), &res); err != nil {
+		return worker.Response{}, fmt.Errorf("decode %s response: %w", action, err)
+	}
+	if !res.OK {
+		if res.Error != nil {
+			return res, fmt.Errorf("%s: %s", res.Error.Code, res.Error.Message)
+		}
+		return res, fmt.Errorf("%s failed", action)
+	}
+	return res, nil
+}
+
+func deployProjectAndServices(defaultProject string, args []string) (string, []string, error) {
+	project := defaultProject
+	if project == "" {
+		project = "."
+	}
+	if len(args) == 0 {
+		return project, nil, nil
+	}
+	first := args[0]
+	if strings.HasSuffix(first, ".yaml") || strings.HasSuffix(first, ".yml") {
+		if _, err := os.Stat(first); err != nil {
+			return "", nil, fmt.Errorf("project path %q does not exist", first)
+		}
+		return first, args[1:], nil
+	}
+	if stat, err := os.Stat(first); err == nil {
+		if stat.IsDir() {
+			return first, args[1:], nil
+		}
+		return first, args[1:], nil
+	} else if looksLikeDeployProjectPath(first) {
+		return "", nil, fmt.Errorf("project path %q does not exist", first)
+	}
+	return project, args, nil
+}
+
+func looksLikeDeployProjectPath(value string) bool {
+	return value == "." ||
+		value == ".." ||
+		strings.HasPrefix(value, "."+string(os.PathSeparator)) ||
+		strings.HasPrefix(value, ".."+string(os.PathSeparator)) ||
+		strings.HasPrefix(value, "~"+string(os.PathSeparator)) ||
+		filepath.IsAbs(value) ||
+		strings.ContainsRune(value, os.PathSeparator)
+}
+
+func serviceStatusSummary(services []worker.ServiceState) string {
+	if len(services) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(services))
+	for _, svc := range services {
+		parts = append(parts, svc.Name+":"+svc.Status)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func printDeployURLs(w io.Writer, urls []worker.PreviewURL) {
+	if len(urls) == 0 {
+		_, _ = fmt.Fprintln(w, "no urls")
+		return
+	}
+	_, _ = fmt.Fprintln(w, "SERVICE  URL  HEALTHY")
+	for _, url := range urls {
+		_, _ = fmt.Fprintf(w, "%s  %s  %t\n", url.Service, url.URL, url.Healthy)
+	}
+}
+
 func syncCommand(opts *options) *cobra.Command {
 	var dryRun bool
 	var deleteRemote bool
@@ -771,11 +1160,9 @@ func daemonCommand(opts *options) *cobra.Command {
 	var foreground bool
 	cmd := &cobra.Command{
 		Use:   "daemon",
-		Short: "Run the private worker daemon",
+		Short: "Manage the private worker daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !foreground && !opts.quiet {
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "daemon currently runs in the foreground; use shell/backgrounding if needed")
-			}
+			_ = foreground
 			if opts.json {
 				_ = output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "message": "daemon starting"})
 			} else if !opts.quiet {
@@ -786,7 +1173,184 @@ func daemonCommand(opts *options) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", true, "run in the foreground")
 	cmd.Flags().BoolVar(&allowRoot, "allow-root", false, "allow daemon to run as root")
+	cmd.AddCommand(daemonStartCommand(opts, &allowRoot))
+	cmd.AddCommand(daemonStopCommand(opts))
+	cmd.AddCommand(daemonStatusCommand(opts))
 	return cmd
+}
+
+func daemonStartCommand(opts *options, allowRoot *bool) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "Start the private worker daemon in the background",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return startLocalDaemon(cmd, opts, *allowRoot)
+		},
+	}
+	return cmd
+}
+
+func daemonStopCommand(opts *options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "stop",
+		Short: "Stop the private worker daemon",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return stopLocalDaemon(cmd, opts)
+		},
+	}
+	return cmd
+}
+
+func daemonStatusCommand(opts *options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Check whether the private worker daemon is running",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			socket := daemonSocket(opts)
+			res, err := worker.Call(socket, worker.Request{Action: "ping"})
+			if err != nil {
+				if opts.json {
+					return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": false, "running": false, "socket": socket, "error": err.Error()})
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon stopped (%s)\n", socket)
+				return nil
+			}
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "socket": socket, "message": res.Message})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon running (%s)\n", socket)
+			return nil
+		},
+	}
+	return cmd
+}
+
+func startLocalDaemon(cmd *cobra.Command, opts *options, allowRoot bool) error {
+	socket := daemonSocket(opts)
+	if res, err := worker.Call(socket, worker.Request{Action: "ping"}); err == nil {
+		if opts.json {
+			return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "socket": socket, "message": res.Message})
+		}
+		if !opts.quiet {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon already running (%s)\n", socket)
+		}
+		return nil
+	}
+	result, err := launchLocalDaemon(cmd.Context(), opts, allowRoot)
+	if err != nil {
+		return err
+	}
+	if opts.json {
+		return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "pid": result.PID, "socket": result.Socket, "log": result.Log})
+	}
+	if !opts.quiet {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon started pid=%d socket=%s log=%s\n", result.PID, result.Socket, result.Log)
+	}
+	return nil
+}
+
+func launchLocalDaemon(ctx context.Context, opts *options, allowRoot bool) (daemonLaunchResult, error) {
+	socket := daemonSocket(opts)
+	stateDir := daemonStateDir(opts)
+	logPath := filepath.Join(stateDir, "daemon", "daemon.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return daemonLaunchResult{}, err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return daemonLaunchResult{}, err
+	}
+	defer logFile.Close()
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
+	if err != nil {
+		return daemonLaunchResult{}, err
+	}
+	defer devNull.Close()
+	exe, err := os.Executable()
+	if err != nil {
+		return daemonLaunchResult{}, err
+	}
+	argv := []string{"daemon", "--foreground", "--quiet"}
+	if opts.stateDir != "" {
+		argv = append(argv, "--state-dir", opts.stateDir)
+	}
+	if opts.socket != "" {
+		argv = append(argv, "--socket", opts.socket)
+	}
+	if allowRoot {
+		argv = append(argv, "--allow-root")
+	}
+	child := exec.Command(exe, argv...)
+	child.Stdin = devNull
+	child.Stdout = logFile
+	child.Stderr = logFile
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := child.Start(); err != nil {
+		return daemonLaunchResult{}, err
+	}
+	if err := waitForDaemon(ctx, socket, 5*time.Second); err != nil {
+		return daemonLaunchResult{}, output.NewError("DAEMON_START_FAILED", err.Error(), "Inspect "+logPath)
+	}
+	return daemonLaunchResult{PID: child.Process.Pid, Socket: socket, Log: logPath}, nil
+}
+
+func waitForDaemon(ctx context.Context, socket string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for time.Now().Before(deadline) {
+		if _, err := worker.Call(socket, worker.Request{Action: "ping"}); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if last != nil {
+		return last
+	}
+	return fmt.Errorf("daemon did not become ready")
+}
+
+func stopLocalDaemon(cmd *cobra.Command, opts *options) error {
+	socket := daemonSocket(opts)
+	res, err := worker.Call(socket, worker.Request{Action: "shutdown"})
+	if err != nil {
+		if opts.json {
+			return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": false, "socket": socket, "message": "daemon was not running"})
+		}
+		if !opts.quiet {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon was not running (%s)\n", socket)
+		}
+		return nil
+	}
+	if err := waitForDaemonStopped(socket, 5*time.Second); err != nil {
+		return output.NewError("DAEMON_STOP_FAILED", err.Error(), "")
+	}
+	if opts.json {
+		return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": false, "socket": socket, "message": res.Message})
+	}
+	if !opts.quiet {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s (%s)\n", res.Message, socket)
+	}
+	return nil
+}
+
+func waitForDaemonStopped(socket string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := worker.Call(socket, worker.Request{Action: "ping"}); err != nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon did not stop")
 }
 
 func daemonctlCommand(opts *options) *cobra.Command {
@@ -1189,6 +1753,11 @@ func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, actio
 	if err != nil {
 		return err
 	}
+	if actionNeedsLocalSource(action) {
+		if err := prepareLocalSource(cmd.Context(), loaded, paths); err != nil {
+			return output.NewError("LOCAL_SYNC_FAILED", err.Error(), "Check rsync and the local Workyard run directory")
+		}
+	}
 	rememberRun(cmd.ErrOrStderr(), opts, loaded, registry.RunRef{
 		Worker:           "localhost",
 		Project:          paths.Project,
@@ -1202,6 +1771,11 @@ func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, actio
 	socket := opts.socket
 	if socket == "" {
 		socket = defaultSocket(opts.stateDir)
+	}
+	if action != "stop" {
+		if err := ensureLocalDaemonRunning(cmd.Context(), opts); err != nil {
+			return err
+		}
 	}
 	res, err := worker.Call(socket, worker.Request{
 		Action:   action,
@@ -1219,9 +1793,111 @@ func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, actio
 		Timeout:  extra.Timeout,
 	})
 	if err != nil {
-		return output.NewError("DAEMONCTL_FAILED", err.Error(), "Start workyard daemon --foreground")
+		return output.NewError("DAEMONCTL_FAILED", err.Error(), "Run workyard daemon start")
 	}
 	return printDaemonResponse(cmd.OutOrStdout(), res, opts.json || action == "open", action)
+}
+
+func actionNeedsLocalSource(action string) bool {
+	switch action {
+	case "setup", "build", "start", "restart":
+		return true
+	default:
+		return false
+	}
+}
+
+func ensureLocalDaemonRunning(ctx context.Context, opts *options) error {
+	if _, err := worker.Call(daemonSocket(opts), worker.Request{Action: "ping"}); err == nil {
+		return nil
+	}
+	_, err := launchLocalDaemon(ctx, opts, false)
+	return err
+}
+
+func prepareLocalSource(ctx context.Context, loaded config.Loaded, paths remote.Paths) error {
+	source := filepath.FromSlash(paths.Source)
+	logs := filepath.FromSlash(paths.Logs)
+	if err := guardLocalManagedPaths(paths); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(logs, 0o700); err != nil {
+		return err
+	}
+	if err := guardLocalManagedPaths(paths); err != nil {
+		return err
+	}
+	excludeFile, err := writeLocalExcludeFile(loaded.Config)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(excludeFile)
+
+	var stderr bytes.Buffer
+	args := []string{"-az", "--delete", "--delete-excluded", "--exclude-from", excludeFile, "--", loaded.Config.Root + string(filepath.Separator), source + string(filepath.Separator)}
+	rsync := exec.CommandContext(ctx, "rsync", args...)
+	rsync.Stderr = &stderr
+	if err := rsync.Run(); err != nil {
+		return fmt.Errorf("rsync local source failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+func guardLocalManagedPaths(paths remote.Paths) error {
+	for _, value := range []string{
+		filepath.FromSlash(path.Join(paths.Home, ".workyard")),
+		filepath.FromSlash(path.Join(paths.Home, ".workyard", "runs")),
+		filepath.FromSlash(path.Dir(paths.RunRoot)),
+		filepath.FromSlash(paths.RunRoot),
+		filepath.FromSlash(paths.Source),
+		filepath.FromSlash(paths.Logs),
+	} {
+		info, err := os.Lstat(value)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink path: %s", value)
+		}
+	}
+	return nil
+}
+
+func writeLocalExcludeFile(cfg config.Config) (string, error) {
+	f, err := os.CreateTemp("", "workyard-local-excludes-*.txt")
+	if err != nil {
+		return "", err
+	}
+	seen := map[string]bool{}
+	for _, item := range append(syncer.BuiltinExcludes, cfg.Sync.Exclude...) {
+		item = strings.TrimSpace(item)
+		if item == "" || seen[item] {
+			continue
+		}
+		if cfg.Sync.IncludeEnvFiles && isEnvExclude(item) {
+			continue
+		}
+		seen[item] = true
+		if _, err := fmt.Fprintln(f, item); err != nil {
+			_ = f.Close()
+			return "", err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+func isEnvExclude(item string) bool {
+	item = strings.TrimSpace(item)
+	return item == ".env" || strings.HasPrefix(item, ".env.")
 }
 
 func remoteControl(cmd *cobra.Command, opts *options, loaded config.Loaded, action, run string, services []string, extra controlExtra) error {
@@ -1357,6 +2033,21 @@ func defaultSocket(stateDir string) string {
 		stateDir = filepath.Join(home, ".workyard")
 	}
 	return filepath.Join(stateDir, "daemon", "workyard.sock")
+}
+
+func daemonSocket(opts *options) string {
+	if opts.socket != "" {
+		return opts.socket
+	}
+	return defaultSocket(opts.stateDir)
+}
+
+func daemonStateDir(opts *options) string {
+	if opts.stateDir != "" {
+		return opts.stateDir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".workyard")
 }
 
 func rememberRun(w io.Writer, opts *options, loaded config.Loaded, ref registry.RunRef) {

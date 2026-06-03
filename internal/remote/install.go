@@ -28,6 +28,7 @@ type InstallResult struct {
 	LocalBinary      string   `json:"localBinary"`
 	RemoteBinary     string   `json:"remoteBinary"`
 	InstalledVersion string   `json:"installedVersion"`
+	DaemonRestarted  bool     `json:"daemonRestarted,omitempty"`
 	BytesCopied      int64    `json:"bytesCopied"`
 }
 
