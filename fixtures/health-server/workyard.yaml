@@ -1,0 +1,46 @@
+name: workyard-health-fixture
+
+sync:
+  exclude:
+    - __pycache__
+
+worker:
+  portRange: "3100-3999"
+
+setup:
+  command: python3 lifecycle.py setup
+  timeout: 10s
+
+build:
+  command: python3 lifecycle.py build
+  timeout: 10s
+
+services:
+  web:
+    path: .
+    startCommand: python3 server.py
+    port:
+      default: 3000
+      env: PORT
+    env:
+      HOST: 0.0.0.0
+    health:
+      url: http://127.0.0.1:3000/health
+      timeout: 15s
+    beforeStart:
+      command: python3 lifecycle.py beforeStart
+      timeout: 10s
+    onClose:
+      command: python3 lifecycle.py onClose
+      timeout: 10s
+    watch:
+      paths:
+        - .
+      include:
+        - "*.py"
+        - "workyard.yaml"
+      exclude:
+        - "__pycache__"
+        - ".workyard-fixture"
+      action: sync-restart
+      debounce: 500ms

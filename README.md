@@ -1,0 +1,430 @@
+# Workyard
+
+Workyard is an agent-first remote development runner. It syncs a local project to a private worker over SSH, starts configured services through a worker daemon, tracks health and lifecycle events, and exposes a local dashboard for monitoring what is running.
+
+The default model is private and local:
+
+- Project files sync with `rsync` over SSH.
+- Remote control happens through a private Unix socket on the worker.
+- Preview URLs stay on your private network, such as Tailscale.
+- The monitor dashboard listens on loopback only.
+- Logs are read through bounded CLI commands, not exposed publicly.
+
+## Requirements
+
+- Go 1.24 or newer
+- `rsync`
+- `ssh`
+- Tailscale installed, running, and connected
+- A worker machine reachable over SSH, usually through Tailscale
+
+Check your local setup with:
+
+```sh
+workyard doctor
+```
+
+With a worker:
+
+```sh
+workyard --worker user@worker-host doctor
+```
+
+## Build
+
+From the repository root:
+
+```sh
+go build -o dist/workyard-darwin-arm64 ./cmd/workyard
+```
+
+For a Linux ARM64 worker, such as a Raspberry Pi:
+
+```sh
+GOOS=linux GOARCH=arm64 go build -o dist/workyard-linux-arm64 ./cmd/workyard
+```
+
+Install the local binary somewhere on your `PATH`:
+
+```sh
+scripts/local/install.sh
+```
+
+The local installer currently supports macOS. It builds Workyard from this checkout, installs it to `~/.local/bin/workyard`, and adds a marked PATH block to `~/.zshrc` when needed.
+
+Uninstall the local binary:
+
+```sh
+scripts/local/uninstall.sh
+```
+
+Install or upgrade the worker binary on the remote machine:
+
+```sh
+workyard --worker user@worker-host install
+```
+
+Workyard expects the remote binary at `~/.workyard/bin/workyard` unless you pass `--remote-binary`.
+The install command detects the worker OS/architecture, uploads `dist/workyard-<os>-<arch>`, and verifies the installed version.
+
+## Quick Start
+
+Create a config:
+
+```sh
+workyard init
+```
+
+Validate the config:
+
+```sh
+workyard config check
+```
+
+Sync to a worker:
+
+```sh
+workyard --worker user@worker-host sync
+```
+
+Run project lifecycle hooks:
+
+```sh
+workyard --worker user@worker-host setup
+workyard --worker user@worker-host build
+```
+
+Start services:
+
+```sh
+workyard --worker user@worker-host start
+```
+
+Inspect status and URLs:
+
+```sh
+workyard --worker user@worker-host status
+workyard --worker user@worker-host urls
+workyard --worker user@worker-host inspect
+```
+
+Read logs and events:
+
+```sh
+workyard --worker user@worker-host logs web --tail 200
+workyard --worker user@worker-host logs web --follow
+workyard --worker user@worker-host events
+```
+
+Stop services:
+
+```sh
+workyard --worker user@worker-host stop --all
+```
+
+Clean logs or remove a run:
+
+```sh
+workyard --worker user@worker-host cleanup logs
+workyard --worker user@worker-host cleanup run
+```
+
+`cleanup logs` truncates Workyard log files in place. `cleanup run` stops services first, removes only the validated `~/.workyard/runs/<project>/<run>` directory, and removes that run from the local monitor registry.
+
+## Dashboard
+
+Workyard can run a local monitor server with an embedded dashboard:
+
+```sh
+workyard server --open
+```
+
+The server listens on `127.0.0.1:3099` by default. Use another loopback port if needed:
+
+```sh
+workyard server --listen 127.0.0.1:32200 --open
+```
+
+The dashboard is backed by local JSON APIs:
+
+- `GET /api/state`
+- `GET /api/workers`
+- `GET /api/runs`
+- `GET /api/services`
+- `GET /api/events`
+- `GET /api/urls`
+
+Commands such as `sync`, `start`, `status`, and `watch` register active runs in `~/.workyard/local/runs.json`, which the monitor polls through SSH.
+
+Manage that local monitor registry:
+
+```sh
+workyard runs list
+workyard runs remove user@worker-host my-project feature-branch
+workyard runs prune --older-than 168h
+workyard workers list
+workyard workers remove user@worker-host
+```
+
+Registry pruning only removes stale monitor entries. It does not delete remote run directories.
+
+## Configuration
+
+Workyard uses `workyard.yaml` at the project root.
+
+Example:
+
+```yaml
+name: my-project
+
+sync:
+  exclude:
+    - node_modules
+    - dist
+
+worker:
+  portRange: "3100-3999"
+
+setup:
+  command: npm install
+  timeout: 10m
+
+build:
+  command: npm run build
+  timeout: 10m
+
+services:
+  web:
+    path: .
+    startCommand: npm run dev
+    port:
+      default: 3000
+      env: PORT
+    env:
+      HOST: 0.0.0.0
+    health:
+      url: http://127.0.0.1:3000/health
+      timeout: 30s
+    beforeStart:
+      command: npm run prepare
+      timeout: 2m
+    onClose:
+      command: npm run cleanup
+      timeout: 2m
+    watch:
+      paths:
+        - src
+        - package.json
+      include:
+        - "*.js"
+        - "*.ts"
+        - "*.tsx"
+        - "package.json"
+      exclude:
+        - node_modules
+      action: sync-restart
+      debounce: 750ms
+```
+
+### Project Fields
+
+- `name`: Project name. Used in the remote run path.
+- `sync.exclude`: Extra paths or patterns to exclude from sync.
+- `sync.includeEnvFiles`: Include `.env` files when syncing. Defaults to false.
+- `worker.portRange`: Port range Workyard may allocate on the worker.
+- `setup`: Optional project setup command.
+- `build`: Optional project build command.
+- `services`: Service definitions.
+
+### Service Fields
+
+- `path`: Relative working directory inside the project.
+- `startCommand`: Command used to start the service.
+- `shell`: Run the command through a shell when true.
+- `port.default`: Local/configured port.
+- `port.env`: Environment variable that receives the assigned worker port.
+- `env`: Extra environment variables for the service.
+- `health.url`: Local worker health URL.
+- `health.timeout`: Startup health timeout.
+- `beforeStart`: Optional command run before the service starts.
+- `onClose`: Optional command run after the service stops.
+- `watch`: Optional file watch configuration.
+
+The old `command` service field is not supported. Use `startCommand`.
+
+## Secrets Model
+
+Workyard treats `.env` files as sensitive inputs. By default, sync excludes `.env`, `.env.local`, and `.env.*.local`; set `sync.includeEnvFiles: true` only for fixtures or worker environments where those files are intentionally copied. Workyard never edits `.env` files to resolve port conflicts. Assigned ports are injected into process environments through `WORKYARD_PORT` and the configured `port.env` name.
+
+Daemon control stays on a private Unix socket under `~/.workyard/daemon`, remote commands run over SSH, and logs are read through bounded commands unless `logs --follow` is explicitly requested. Log and inspect output redacts common secret shapes such as `TOKEN=value`, `api_key: value`, bearer tokens, and URL credentials, but redaction is a safety net rather than a reason to print secrets.
+
+## Watch Mode
+
+Watch mode polls local files, syncs changes, and optionally restarts services:
+
+```sh
+workyard --worker user@worker-host watch
+```
+
+Watch a specific service:
+
+```sh
+workyard --worker user@worker-host watch web
+```
+
+Run one change cycle and exit:
+
+```sh
+workyard --worker user@worker-host watch web --once
+```
+
+Supported watch actions:
+
+- `sync-restart`: Sync changes and restart matching services.
+- `sync-only`: Sync changes without restarting.
+
+Watch mode uses filesystem events when available and falls back to polling with `--poll-interval`.
+
+## Run IDs
+
+By default, Workyard derives a run id from the current project. You can provide one explicitly:
+
+```sh
+workyard --worker user@worker-host --run feature-branch sync
+workyard --worker user@worker-host --run feature-branch start
+```
+
+Remote runs are stored under:
+
+```text
+~/.workyard/runs/<project>/<run>/
+```
+
+Each run contains:
+
+- `source/`: Synced project files.
+- `logs/`: Service logs and lifecycle events.
+- `state.json`: Worker daemon state.
+- `sync.json`: Sync metadata.
+
+## Release Packaging
+
+Build GitHub/Homebrew-ready release artifacts:
+
+```sh
+VERSION=0.1.0 scripts/build-release.sh
+```
+
+The release builder writes tarballs, `checksums.txt`, and `manifest.json` under `dist/release/`:
+
+```text
+workyard-darwin-amd64.tar.gz
+workyard-darwin-arm64.tar.gz
+workyard-linux-amd64.tar.gz
+workyard-linux-arm64.tar.gz
+checksums.txt
+manifest.json
+```
+
+End-user install script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jackbelluche/workyard/main/scripts/install.sh | sh
+```
+
+For private releases, set `WORKYARD_REPO`, `WORKYARD_VERSION`, or `WORKYARD_INSTALL_DIR` before running the script. Homebrew formulas can reference the tarball URL and matching SHA-256 from `checksums.txt`.
+
+## Command Reference
+
+Common commands:
+
+```sh
+workyard init
+workyard doctor
+workyard config check
+workyard services
+workyard sync
+workyard setup
+workyard build
+workyard start
+workyard status
+workyard inspect
+workyard urls
+workyard open web
+workyard logs web
+workyard events
+workyard wait web --healthy
+workyard probe web
+workyard restart web
+workyard stop --all
+workyard watch
+workyard server --open
+```
+
+Most commands support:
+
+- `--worker user@worker-host`
+- `--run <run-id>`
+- `--project <path>`
+- `--json`
+- `--verbose`
+
+## Security Notes
+
+Workyard is designed to stay private by default:
+
+- It uses SSH over a private network such as Tailscale.
+- The worker daemon listens on a Unix socket, not public TCP.
+- The dashboard is loopback-only.
+- Public and link-local health URLs are rejected.
+- Service logs are not published by the dashboard.
+- `.env` files are excluded from sync by default.
+- Runtime ports are injected into process environments instead of mutating `.env` files.
+- Worker paths are validated before running, syncing, reading logs, or deleting files.
+
+## Development
+
+Run tests:
+
+```sh
+go test ./...
+```
+
+Run vet:
+
+```sh
+go vet ./...
+```
+
+Build both local and Linux ARM64 binaries:
+
+```sh
+go build -o dist/workyard-darwin-arm64 ./cmd/workyard
+GOOS=linux GOARCH=arm64 go build -o dist/workyard-linux-arm64 ./cmd/workyard
+```
+
+Try the bundled fixture:
+
+```sh
+workyard --project fixtures/health-server config check
+workyard --project fixtures/health-server services
+```
+
+With a worker:
+
+```sh
+workyard --project fixtures/health-server --worker user@worker-host sync
+workyard --project fixtures/health-server --worker user@worker-host setup
+workyard --project fixtures/health-server --worker user@worker-host build
+workyard --project fixtures/health-server --worker user@worker-host start web
+workyard --project fixtures/health-server --worker user@worker-host status
+workyard --project fixtures/health-server --worker user@worker-host stop --all
+```
+
+## Status
+
+Workyard is early and intentionally local-first. It is useful today for private remote development workflows, synthetic service fixtures, and agent-friendly inspection of running services.
+
+## License
+
+License TBD.
