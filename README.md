@@ -2,6 +2,33 @@
 
 Workyard is an agent-first remote development runner. It syncs a local project to a private worker over SSH, starts configured services through a worker daemon, tracks health and lifecycle events, and exposes a local dashboard for monitoring what is running.
 
+> **Warning**
+> Workyard should only be installed and run on machines you trust. It syncs project files, starts configured commands, manages local/remote processes, and reads bounded logs over SSH.
+
+## Install
+
+Install from a release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jackbelluche/workyard/main/scripts/install.sh | sh
+```
+
+For local development from this checkout on macOS:
+
+```sh
+git clone git@github.com:jbelluche/workyard.git
+cd workyard
+scripts/local/install.sh
+```
+
+The local installer builds Workyard from source, installs it to `~/.local/bin/workyard`, and adds a marked PATH block to `~/.zshrc` when needed.
+
+Uninstall the local binary:
+
+```sh
+scripts/local/uninstall.sh
+```
+
 The default model is private and local:
 
 - Project files sync with `rsync` over SSH.
@@ -12,7 +39,7 @@ The default model is private and local:
 
 ## Requirements
 
-- Go 1.24 or newer
+- Go 1.25 or newer
 - `rsync`
 - `ssh`
 - Tailscale installed, running, and connected
