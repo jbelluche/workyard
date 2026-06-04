@@ -403,33 +403,72 @@ Set `WORKYARD_REPO`, `WORKYARD_VERSION`, or `WORKYARD_INSTALL_DIR` before runnin
 
 ## Command Reference
 
-Common commands:
+Project commands:
 
 ```sh
 workyard init
-workyard doctor
 workyard config check
 workyard services
+workyard --worker user@worker-host sync
+workyard --worker user@worker-host setup
+workyard --worker user@worker-host build
+workyard --worker user@worker-host start
+workyard --worker user@worker-host start web
+workyard --worker user@worker-host status
+workyard --worker user@worker-host inspect
+workyard --worker user@worker-host urls
+workyard --worker user@worker-host open web
+workyard --worker user@worker-host logs web --tail 200
+workyard --worker user@worker-host logs web --follow
+workyard --worker user@worker-host events
+workyard --worker user@worker-host wait web --healthy
+workyard --worker user@worker-host probe web
+workyard --worker user@worker-host restart web
+workyard --worker user@worker-host stop --all
+workyard --worker user@worker-host watch
+```
+
+End-to-end deployment:
+
+```sh
+workyard deploy . --worker user@worker-host
+workyard deploy /path/to/project/workyard.yaml --worker user@worker-host
+workyard deploy . --worker user@worker-host --fresh
+workyard deploy . --worker user@worker-host --install
+```
+
+Dependency, install, and daemon commands:
+
+```sh
+workyard doctor
+workyard --worker user@worker-host doctor
+workyard --worker user@worker-host install
+workyard daemon start
+workyard daemon status
+workyard daemon stop
+```
+
+Worker and monitor registry commands:
+
+```sh
 workyard workers discover
 workyard workers add jack-r5-16gb --user jack
 workyard workers config show
-workyard deploy . --worker user@worker-host
-workyard sync
-workyard setup
-workyard build
-workyard start
-workyard status
-workyard inspect
-workyard urls
-workyard open web
-workyard logs web
-workyard events
-workyard wait web --healthy
-workyard probe web
-workyard restart web
-workyard stop --all
-workyard watch
+workyard workers list
+workyard workers remove jack-r5-16gb
+workyard runs list
+workyard runs remove user@worker-host my-project feature-branch
+workyard runs prune --older-than 168h
+```
+
+Cleanup and utility commands:
+
+```sh
+workyard --worker user@worker-host cleanup logs
+workyard --worker user@worker-host cleanup run
 workyard server --open
+workyard version
+workyard completion zsh
 ```
 
 Most commands support:
