@@ -1,0 +1,19 @@
+version: 1
+
+workers:
+  jack-rasp-five:
+    ssh:
+      user: jack
+      host: jack-rasp-five
+
+    register: true
+
+    workyard:
+      install: true
+      daemon: true
+
+    tailscale:
+      requireConnected: true
+
+    checks:
+      doctor: true

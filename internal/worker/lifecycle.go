@@ -117,7 +117,7 @@ func (d *Daemon) start(req Request) Response {
 		}
 		d.mu.Unlock()
 
-		healthState := waitInitialHealth(state, svc.Health.Timeout)
+		healthState := waitInitialHealth(state, startHealthTimeout(svc.Health.Timeout, req.Timeout))
 		appendEvent(req.RunRoot, healthEvent(healthState))
 
 		d.mu.Lock()
@@ -485,6 +485,16 @@ func waitInitialHealth(state ServiceState, timeout time.Duration) ServiceState {
 	state.Status = "unhealthy"
 	state.Healthy = false
 	return state
+}
+
+func startHealthTimeout(configured time.Duration, raw string) time.Duration {
+	if raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return configured
 }
 
 func healthOK(raw string, timeout time.Duration) bool {

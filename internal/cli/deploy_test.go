@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestDeployProjectAndServicesUsesExistingDirectory(t *testing.T) {
@@ -61,5 +62,13 @@ func TestDeployProjectAndServicesRejectsMissingPathLikeArg(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	if _, _, err := deployProjectAndServices(".", []string{missing}); err == nil {
 		t.Fatal("expected missing path-like arg to be rejected")
+	}
+}
+
+func TestRemoteTimeoutUsesRequestedStartTimeout(t *testing.T) {
+	got := remoteTimeout("start", "10m")
+	want := 10*time.Minute + 10*time.Second
+	if got != want {
+		t.Fatalf("start timeout=%s, want %s", got, want)
 	}
 }

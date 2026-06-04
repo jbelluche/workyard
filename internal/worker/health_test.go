@@ -34,3 +34,17 @@ func TestProbeURLRejectsRedirectToDisallowedHost(t *testing.T) {
 		t.Fatal("expected redirect to link-local host to be rejected")
 	}
 }
+
+func TestStartHealthTimeoutUsesRequestTimeout(t *testing.T) {
+	got := startHealthTimeout(3*time.Minute, "10m")
+	if got != 10*time.Minute {
+		t.Fatalf("timeout=%s, want 10m", got)
+	}
+}
+
+func TestStartHealthTimeoutFallsBackToConfiguredTimeout(t *testing.T) {
+	got := startHealthTimeout(3*time.Minute, "bad")
+	if got != 3*time.Minute {
+		t.Fatalf("timeout=%s, want 3m", got)
+	}
+}

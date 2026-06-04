@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackbelluche/workyard/internal/bootstrap"
 	"github.com/jackbelluche/workyard/internal/config"
 	"github.com/jackbelluche/workyard/internal/doctor"
 	"github.com/jackbelluche/workyard/internal/monitor"
@@ -28,6 +29,7 @@ import (
 	watcher "github.com/jackbelluche/workyard/internal/watch"
 	"github.com/jackbelluche/workyard/internal/worker"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 const Version = "0.1.0"
@@ -395,6 +397,58 @@ func workersCommand(opts *options) *cobra.Command {
 			return nil
 		},
 	}
+	var setupConfig string
+	var setupDryRun bool
+	var setupArtifactDir string
+	var setupLocalBinary string
+	var setupAskSudoPassword bool
+	setup := &cobra.Command{
+		Use:   "setup <worker>",
+		Short: "Bootstrap a reachable machine as a Workyard worker",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var sudoPassword string
+			if setupAskSudoPassword && !setupDryRun {
+				var err error
+				sudoPassword, err = readHiddenPassword(cmd.ErrOrStderr(), "Sudo password for "+args[0]+": ")
+				if err != nil {
+					return output.NewError("SUDO_PASSWORD_FAILED", err.Error(), "Run without --ask-sudo-password or enable passwordless sudo on the worker")
+				}
+			}
+			report, err := bootstrap.Run(cmd.Context(), bootstrap.Options{
+				Worker:         args[0],
+				ConfigPath:     setupConfig,
+				ConfigRequired: cmd.Flags().Changed("config"),
+				StateDir:       opts.stateDir,
+				RemoteRoot:     opts.remoteRoot,
+				RemoteBinary:   opts.remoteBinary,
+				Version:        Version,
+				ArtifactDir:    setupArtifactDir,
+				LocalBinary:    setupLocalBinary,
+				SudoPassword:   sudoPassword,
+				DryRun:         setupDryRun,
+			})
+			if err != nil {
+				return output.NewError("WORKER_SETUP_FAILED", err.Error(), "Check workyard.bootstrap.yaml")
+			}
+			if opts.json {
+				if err := output.WriteJSON(cmd.OutOrStdout(), report); err != nil {
+					return err
+				}
+			} else {
+				printBootstrapReport(cmd.OutOrStdout(), report)
+			}
+			if !report.OK {
+				return printedError{err: errors.New("worker setup failed"), exitCode: 1}
+			}
+			return nil
+		},
+	}
+	setup.Flags().StringVar(&setupConfig, "config", bootstrap.DefaultConfigName, "worker bootstrap config file")
+	setup.Flags().BoolVar(&setupDryRun, "dry-run", false, "show setup steps without changing the worker")
+	setup.Flags().StringVar(&setupArtifactDir, "artifact-dir", "dist", "directory containing or receiving workyard-<os>-<arch> artifacts")
+	setup.Flags().StringVar(&setupLocalBinary, "local-binary", "", "specific local binary to upload")
+	setup.Flags().BoolVar(&setupAskSudoPassword, "ask-sudo-password", false, "prompt for a sudo password for package and Docker setup")
 	configCmd := &cobra.Command{Use: "config", Short: "Inspect worker configuration"}
 	configShow := &cobra.Command{
 		Use:   "show",
@@ -428,7 +482,7 @@ func workersCommand(opts *options) *cobra.Command {
 		},
 	}
 	configCmd.AddCommand(configShow)
-	root.AddCommand(list, add, discover, remove, configCmd)
+	root.AddCommand(list, add, discover, remove, setup, configCmd)
 	return root
 }
 
@@ -1097,6 +1151,68 @@ func printDoctorReport(w io.Writer, report doctor.Report) {
 	_, _ = fmt.Fprintln(w, "\nfailed: one or more required checks failed")
 }
 
+func printBootstrapReport(w io.Writer, report bootstrap.Report) {
+	_, _ = fmt.Fprintf(w, "workyard workers setup %s\n", report.WorkerName)
+	if report.ConfigFound {
+		_, _ = fmt.Fprintf(w, "config: %s\n", report.ConfigPath)
+	}
+	if report.DryRun {
+		_, _ = fmt.Fprintln(w, "dry run: no worker changes were made")
+	}
+	rows := make([][]string, 0, len(report.Steps))
+	for _, step := range report.Steps {
+		rows = append(rows, []string{step.Name, strings.ToUpper(step.Status), step.Message})
+	}
+	_ = output.WriteTable(w, []string{"CHECK", "STATUS", "MESSAGE"}, rows)
+	for _, step := range report.Steps {
+		if step.Detail != "" {
+			_, _ = fmt.Fprintf(w, "  %s detail: %s\n", step.Name, step.Detail)
+		}
+		if step.Hint != "" && step.Status != bootstrap.StatusPass && step.Status != bootstrap.StatusSkip && step.Status != bootstrap.StatusPlan {
+			_, _ = fmt.Fprintf(w, "  %s hint: %s\n", step.Name, step.Hint)
+		}
+	}
+	if report.DoctorReport != nil && !report.DoctorReport.OK {
+		_, _ = fmt.Fprintln(w)
+		printDoctorReport(w, *report.DoctorReport)
+	}
+	if report.OK {
+		_, _ = fmt.Fprintln(w, "\nok: worker setup completed")
+		return
+	}
+	_, _ = fmt.Fprintln(w, "\nfailed: worker setup did not complete")
+}
+
+func readHiddenPassword(w io.Writer, prompt string) (string, error) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return "", errors.New("stdin is not a terminal")
+	}
+	if _, err := fmt.Fprint(w, prompt); err != nil {
+		return "", err
+	}
+	passwordBytes, err := term.ReadPassword(fd)
+	_, _ = fmt.Fprintln(w)
+	if err != nil {
+		return "", err
+	}
+	defer zeroBytes(passwordBytes)
+	password := string(passwordBytes)
+	if password == "" {
+		return "", errors.New("sudo password must not be empty")
+	}
+	if strings.ContainsAny(password, "\x00\r\n") {
+		return "", errors.New("sudo password contains unsupported control characters")
+	}
+	return password, nil
+}
+
+func zeroBytes(value []byte) {
+	for i := range value {
+		value[i] = 0
+	}
+}
+
 func serverCommand(opts *options) *cobra.Command {
 	var listen string
 	var refreshInterval time.Duration
@@ -1554,7 +1670,7 @@ func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string
 	} else if opts.verbose && !opts.json {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before start skipped: %s\n", err)
 	}
-	startRes, err := remoteDaemonCall(cmd.Context(), opts, paths, "start", services, controlExtra{})
+	startRes, err := remoteDaemonCall(cmd.Context(), opts, paths, "start", services, controlExtra{Timeout: d.timeout})
 	if err != nil {
 		return output.NewError("START_FAILED", err.Error(), "Run workyard inspect --json or logs <service>")
 	}
@@ -2724,7 +2840,7 @@ func rememberRun(w io.Writer, opts *options, loaded config.Loaded, ref registry.
 }
 
 func remoteTimeout(action, timeout string) time.Duration {
-	if action == "wait" && timeout != "" {
+	if (action == "wait" || action == "start" || action == "restart") && timeout != "" {
 		d, err := time.ParseDuration(timeout)
 		if err == nil {
 			return d + 10*time.Second

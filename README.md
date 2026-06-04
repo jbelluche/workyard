@@ -51,6 +51,12 @@ With a worker:
 workyard --worker user@worker-host doctor
 ```
 
+Once passwordless SSH works, bootstrap a new worker:
+
+```sh
+workyard workers setup worker-name --config workyard.bootstrap.yaml
+```
+
 ## Build
 
 From the repository root:
@@ -220,6 +226,79 @@ Registered names can be used anywhere `--worker` is accepted:
 ```sh
 workyard deploy . --worker jack-r5-16gb --fresh
 ```
+
+Bootstrap a reachable SSH machine as a Workyard-ready worker:
+
+```sh
+workyard workers setup jack-r5-16gb --config workyard.bootstrap.yaml
+```
+
+The setup command can create private Workyard directories, repair `~/.workyard/runs` permissions, build and upload the correct worker binary, start or restart the worker daemon, optionally install apt packages or Docker, register the worker locally, and run a final worker doctor check.
+
+Example `workyard.bootstrap.yaml`:
+
+```yaml
+version: 1
+
+workers:
+  jack-r5-16gb:
+    ssh:
+      user: jack
+      host: jack-r5-16gb
+
+    register: true
+
+    workyard:
+      install: true
+      daemon: true
+
+    tailscale:
+      requireConnected: true
+
+    packages:
+      install: true
+      apt:
+        - rsync
+        - name: curl
+          version: 7.88.1-10+deb12u12
+        - ca-certificates
+
+    docker:
+      install: true
+      composePlugin: true
+      addUserToGroup: true
+      version: 20.10.24+dfsg1-1+deb12u1
+      composeVersion: 2.26.1-1
+
+    checks:
+      doctor: true
+```
+
+Use `--dry-run` to review what setup would do without changing the worker:
+
+```sh
+workyard workers setup jack-r5-16gb --config workyard.bootstrap.yaml --dry-run
+```
+
+By default, setup uses non-interactive SSH and non-interactive `sudo -n`; if a privileged install needs a password, Workyard stops and prints the manual command to run on the worker. For trusted workers, you can opt into a local hidden sudo prompt:
+
+```sh
+workyard workers setup jack-r5-16gb --config workyard.bootstrap.yaml --ask-sudo-password
+```
+
+The password is sent over SSH stdin for the privileged setup commands and is not stored in the bootstrap config. Do not store passwords, Tailscale auth keys, or other secrets in `workyard.bootstrap.yaml`.
+
+Package entries can be plain names or pinned apt package versions:
+
+```yaml
+packages:
+  apt:
+    - rsync
+    - name: curl
+      version: 7.88.1-10+deb12u12
+```
+
+Pinned versions use apt's `package=version` install syntax and must match a version available from the worker's configured apt repositories.
 
 Commands such as `sync`, `start`, `status`, and `watch` register active runs in `~/.workyard/local/runs.json`, which the monitor polls through SSH.
 
@@ -453,6 +532,7 @@ Worker and monitor registry commands:
 ```sh
 workyard workers discover
 workyard workers add jack-r5-16gb --user jack
+workyard workers setup jack-r5-16gb --config workyard.bootstrap.yaml
 workyard workers config show
 workyard workers list
 workyard workers remove jack-r5-16gb
