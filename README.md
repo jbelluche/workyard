@@ -195,6 +195,32 @@ The dashboard is backed by local JSON APIs:
 - `GET /api/events`
 - `GET /api/urls`
 
+Workers can be discovered from Tailscale and registered locally before they have any Workyard runs:
+
+```sh
+workyard workers discover
+workyard workers add jack-r5-16gb --user jack
+workyard workers config show
+workyard workers list
+```
+
+Registered workers are stored in `~/.workyard/local/workers.yaml`. The normal editable fields are `name`, `host`, and `user`; Workyard connects with `user@host` unless `sshTarget` is set as an explicit override.
+
+```yaml
+workers:
+  - name: jack-r5-16gb
+    host: jack-r5-16gb
+    user: jack
+    source: tailscale
+    dnsName: jack-r5-16gb.tailnet.ts.net
+```
+
+Registered names can be used anywhere `--worker` is accepted:
+
+```sh
+workyard deploy . --worker jack-r5-16gb --fresh
+```
+
 Commands such as `sync`, `start`, `status`, and `watch` register active runs in `~/.workyard/local/runs.json`, which the monitor polls through SSH.
 
 Manage that local monitor registry:
@@ -204,7 +230,7 @@ workyard runs list
 workyard runs remove user@worker-host my-project feature-branch
 workyard runs prune --older-than 168h
 workyard workers list
-workyard workers remove user@worker-host
+workyard workers remove jack-r5-16gb
 ```
 
 Registry pruning only removes stale monitor entries. It does not delete remote run directories.
@@ -384,6 +410,9 @@ workyard init
 workyard doctor
 workyard config check
 workyard services
+workyard workers discover
+workyard workers add jack-r5-16gb --user jack
+workyard workers config show
 workyard deploy . --worker user@worker-host
 workyard sync
 workyard setup

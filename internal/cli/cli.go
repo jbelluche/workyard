@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -99,6 +101,17 @@ func newRoot(opts *options) *cobra.Command {
 		Short:         "Agent-first remote development runner",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if opts.worker == "" {
+				return nil
+			}
+			resolved, err := resolveWorkerTarget(opts.stateDir, opts.worker)
+			if err != nil {
+				return output.NewError("WORKER_CONFIG_INVALID", err.Error(), "Run workyard workers config show")
+			}
+			opts.worker = resolved
+			return nil
+		},
 	}
 	root.PersistentFlags().BoolVar(&opts.json, "json", false, "emit machine-readable JSON")
 	root.PersistentFlags().BoolVar(&opts.quiet, "quiet", false, "suppress progress output")
@@ -207,11 +220,11 @@ func runsCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "path": store.Path(), "runs": runs})
 			}
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "WORKER  PROJECT  RUN  UPDATED")
+			rows := make([][]string, 0, len(runs))
 			for _, ref := range runs {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %s  %s\n", ref.Worker, ref.Project, ref.RunID, ref.UpdatedAt.Format(time.RFC3339))
+				rows = append(rows, []string{ref.Worker, ref.Project, ref.RunID, formatTime(ref.UpdatedAt)})
 			}
-			return nil
+			return output.WriteTable(cmd.OutOrStdout(), []string{"WORKER", "PROJECT", "RUN", "UPDATED"}, rows)
 		},
 	}
 	remove := &cobra.Command{
@@ -261,45 +274,685 @@ func runsCommand(opts *options) *cobra.Command {
 }
 
 func workersCommand(opts *options) *cobra.Command {
-	root := &cobra.Command{Use: "workers", Short: "Manage locally registered Workyard workers"}
+	root := &cobra.Command{Use: "workers", Short: "Discover and manage registered Workyard workers"}
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List registered workers",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store := registry.New(registry.DefaultPath(opts.stateDir))
-			workers, err := store.Workers()
+			rows, err := workerListRows(opts)
 			if err != nil {
-				return output.NewError("REGISTRY_READ_FAILED", err.Error(), "")
+				return err
 			}
 			if opts.json {
-				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "path": store.Path(), "workers": workers})
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{
+					"ok":         true,
+					"configPath": registry.DefaultWorkersPath(opts.stateDir),
+					"runsPath":   registry.DefaultPath(opts.stateDir),
+					"workers":    rows,
+				})
 			}
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "WORKER  RUNS  UPDATED")
-			for _, ref := range workers {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s  %d  %s\n", ref.Worker, ref.RunCount, ref.UpdatedAt.Format(time.RFC3339))
+			tableRows := make([][]string, 0, len(rows))
+			for _, row := range rows {
+				tableRows = append(tableRows, []string{row.Name, row.SSHTarget, row.Source, fmt.Sprint(row.RunCount), formatTime(row.UpdatedAt)})
 			}
+			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "SSH TARGET", "SOURCE", "RUNS", "UPDATED"}, tableRows)
+		},
+	}
+	var addUser string
+	var addName string
+	var addSSHTarget string
+	add := &cobra.Command{
+		Use:   "add <tailscale-device-or-host>",
+		Short: "Register a Tailscale device or SSH host as a worker",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			worker, err := buildWorkerConfig(cmd.Context(), opts, args[0], addName, addUser, addSSHTarget)
+			if err != nil {
+				return err
+			}
+			if err := remote.ValidateWorker(worker.EffectiveSSHTarget()); err != nil {
+				return output.NewError("WORKER_INVALID", err.Error(), "")
+			}
+			store := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
+			if err := store.Upsert(worker); err != nil {
+				return output.NewError("WORKER_CONFIG_WRITE_FAILED", err.Error(), "")
+			}
+			stored, ok, err := store.Resolve(worker.Name)
+			if err != nil {
+				return output.NewError("WORKER_CONFIG_READ_FAILED", err.Error(), "")
+			}
+			if ok {
+				worker = stored
+			}
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "path": store.Path(), "worker": workerWithTarget(worker)})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "registered %s as %s\n", worker.Name, worker.EffectiveSSHTarget())
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "config: %s\n", store.Path())
 			return nil
+		},
+	}
+	add.Flags().StringVar(&addUser, "user", "", "SSH username for the worker (defaults to this machine's user)")
+	add.Flags().StringVar(&addName, "name", "", "local Workyard worker name")
+	add.Flags().StringVar(&addSSHTarget, "ssh-target", "", "explicit SSH target override")
+
+	discover := &cobra.Command{
+		Use:   "discover",
+		Short: "Show tracked and untracked Tailscale devices",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rows, err := discoverWorkerRows(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{
+					"ok":         true,
+					"configPath": registry.DefaultWorkersPath(opts.stateDir),
+					"workers":    rows,
+				})
+			}
+			tableRows := make([][]string, 0, len(rows))
+			for _, row := range rows {
+				tableRows = append(tableRows, []string{row.Name, row.Host, fmt.Sprint(row.Online), fmt.Sprint(row.Tracked), row.SSHTarget, firstString(row.TailscaleIPs)})
+			}
+			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "HOST", "ONLINE", "TRACKED", "SSH TARGET", "IP"}, tableRows)
 		},
 	}
 	remove := &cobra.Command{
 		Use:   "remove <worker>",
-		Short: "Remove a worker and its runs from the local monitor registry",
+		Short: "Remove a registered worker and its local run references",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store := registry.New(registry.DefaultPath(opts.stateDir))
-			count, err := store.RemoveWorker(args[0])
+			workerStore := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
+			runStore := registry.New(registry.DefaultPath(opts.stateDir))
+			ref, ok, err := workerStore.Resolve(args[0])
 			if err != nil {
 				return output.NewError("REGISTRY_REMOVE_FAILED", err.Error(), "")
 			}
-			if opts.json {
-				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "removedCount": count})
+			target := args[0]
+			if ok {
+				target = ref.EffectiveSSHTarget()
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed %d run(s)\n", count)
+			removedWorker, err := workerStore.Remove(args[0])
+			if err != nil {
+				return output.NewError("WORKER_CONFIG_REMOVE_FAILED", err.Error(), "")
+			}
+			count, err := runStore.RemoveWorker(target)
+			if err != nil {
+				return output.NewError("REGISTRY_REMOVE_FAILED", err.Error(), "")
+			}
+			if ok && target != args[0] {
+				extra, err := runStore.RemoveWorker(args[0])
+				if err != nil {
+					return output.NewError("REGISTRY_REMOVE_FAILED", err.Error(), "")
+				}
+				count += extra
+			}
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "removedWorker": removedWorker, "removedRunCount": count})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed worker=%t runRefs=%d\n", removedWorker, count)
 			return nil
 		},
 	}
-	root.AddCommand(list, remove)
+	configCmd := &cobra.Command{Use: "config", Short: "Inspect worker configuration"}
+	configShow := &cobra.Command{
+		Use:   "show",
+		Short: "Show registered workers and their current Tailscale status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rows, tailscaleErr, err := registeredWorkerStatusRows(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			if opts.json {
+				res := map[string]any{
+					"ok":          true,
+					"path":        registry.DefaultWorkersPath(opts.stateDir),
+					"workers":     rows,
+					"workerCount": len(rows),
+				}
+				if tailscaleErr != nil {
+					res["tailscaleError"] = tailscaleErr.Error()
+				}
+				return output.WriteJSON(cmd.OutOrStdout(), res)
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "config: %s\n", registry.DefaultWorkersPath(opts.stateDir))
+			if tailscaleErr != nil {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "tailscale: %s\n", tailscaleErr)
+			}
+			tableRows := make([][]string, 0, len(rows))
+			for _, row := range rows {
+				tableRows = append(tableRows, []string{row.Name, row.SSHTarget, optionalBool(row.OnlineKnown, row.Online), fmt.Sprint(row.InTailscale), formatTime(row.UpdatedAt)})
+			}
+			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "SSH TARGET", "ONLINE", "TAILSCALE", "UPDATED"}, tableRows)
+		},
+	}
+	configCmd.AddCommand(configShow)
+	root.AddCommand(list, add, discover, remove, configCmd)
 	return root
+}
+
+type workerListRow struct {
+	Name      string    `json:"name"`
+	Host      string    `json:"host,omitempty"`
+	User      string    `json:"user,omitempty"`
+	SSHTarget string    `json:"sshTarget"`
+	Source    string    `json:"source"`
+	RunCount  int       `json:"runCount"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty,omitzero"`
+}
+
+type workerDiscoveryRow struct {
+	Name         string   `json:"name"`
+	Host         string   `json:"host"`
+	DNSName      string   `json:"dnsName,omitempty"`
+	TailscaleIPs []string `json:"tailscaleIPs,omitempty"`
+	OS           string   `json:"os,omitempty"`
+	Online       bool     `json:"online"`
+	Self         bool     `json:"self,omitempty"`
+	Tracked      bool     `json:"tracked"`
+	SSHTarget    string   `json:"sshTarget,omitempty"`
+	Source       string   `json:"source"`
+}
+
+type workerStatusRow struct {
+	Name         string    `json:"name"`
+	Host         string    `json:"host"`
+	User         string    `json:"user"`
+	SSHTarget    string    `json:"sshTarget"`
+	Source       string    `json:"source,omitempty"`
+	DNSName      string    `json:"dnsName,omitempty"`
+	TailscaleIPs []string  `json:"tailscaleIPs,omitempty"`
+	Online       bool      `json:"online"`
+	OnlineKnown  bool      `json:"onlineKnown"`
+	InTailscale  bool      `json:"inTailscale"`
+	UpdatedAt    time.Time `json:"updatedAt,omitempty,omitzero"`
+}
+
+type tailscaleStatusOutput struct {
+	BackendState string                         `json:"BackendState"`
+	Self         *tailscalePeerStatus           `json:"Self"`
+	Peer         map[string]tailscalePeerStatus `json:"Peer"`
+}
+
+type tailscalePeerStatus struct {
+	DNSName      string   `json:"DNSName"`
+	HostName     string   `json:"HostName"`
+	OS           string   `json:"OS"`
+	Online       bool     `json:"Online"`
+	TailscaleIPs []string `json:"TailscaleIPs"`
+}
+
+type tailscaleDevice struct {
+	Name         string
+	Host         string
+	DNSName      string
+	OS           string
+	Online       bool
+	Self         bool
+	TailscaleIPs []string
+}
+
+func workerListRows(opts *options) ([]workerListRow, error) {
+	workerStore := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
+	runStore := registry.New(registry.DefaultPath(opts.stateDir))
+	registered, err := workerStore.List()
+	if err != nil {
+		return nil, output.NewError("WORKER_CONFIG_READ_FAILED", err.Error(), "")
+	}
+	runWorkers, err := runStore.Workers()
+	if err != nil {
+		return nil, output.NewError("REGISTRY_READ_FAILED", err.Error(), "")
+	}
+	runCounts := map[string]registry.WorkerRef{}
+	for _, ref := range runWorkers {
+		runCounts[ref.Worker] = ref
+	}
+	seen := map[string]bool{}
+	rows := make([]workerListRow, 0, len(registered)+len(runWorkers))
+	for _, worker := range registered {
+		target := worker.EffectiveSSHTarget()
+		runCount := 0
+		updated := worker.UpdatedAt
+		if ref, ok := runCounts[target]; ok {
+			runCount = ref.RunCount
+			if ref.UpdatedAt.After(updated) {
+				updated = ref.UpdatedAt
+			}
+		}
+		rows = append(rows, workerListRow{
+			Name:      worker.Name,
+			Host:      worker.Host,
+			User:      worker.User,
+			SSHTarget: target,
+			Source:    firstNonEmpty(worker.Source, "manual"),
+			RunCount:  runCount,
+			UpdatedAt: updated,
+		})
+		seen[target] = true
+		seen[worker.Name] = true
+	}
+	for _, ref := range runWorkers {
+		if seen[ref.Worker] {
+			continue
+		}
+		rows = append(rows, workerListRow{
+			Name:      workerDisplayName(ref.Worker),
+			SSHTarget: ref.Worker,
+			Source:    "runs",
+			RunCount:  ref.RunCount,
+			UpdatedAt: ref.UpdatedAt,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	return rows, nil
+}
+
+func discoverWorkerRows(ctx context.Context, opts *options) ([]workerDiscoveryRow, error) {
+	devices, err := discoverTailscaleDevices(ctx)
+	if err != nil {
+		return nil, output.NewError("TAILSCALE_DISCOVER_FAILED", err.Error(), "Run tailscale status --json to inspect the local Tailscale state")
+	}
+	store := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
+	registered, err := store.List()
+	if err != nil {
+		return nil, output.NewError("WORKER_CONFIG_READ_FAILED", err.Error(), "")
+	}
+	rows := mergeWorkerDiscovery(devices, registered)
+	return rows, nil
+}
+
+func registeredWorkerStatusRows(ctx context.Context, opts *options) ([]workerStatusRow, error, error) {
+	store := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
+	registered, err := store.List()
+	if err != nil {
+		return nil, nil, output.NewError("WORKER_CONFIG_READ_FAILED", err.Error(), "")
+	}
+	devices, tailscaleErr := discoverTailscaleDevices(ctx)
+	deviceByKey := tailscaleDeviceMap(devices)
+	rows := make([]workerStatusRow, 0, len(registered))
+	for _, worker := range registered {
+		row := workerStatusRow{
+			Name:      worker.Name,
+			Host:      worker.Host,
+			User:      worker.User,
+			SSHTarget: worker.EffectiveSSHTarget(),
+			Source:    firstNonEmpty(worker.Source, "manual"),
+			DNSName:   worker.DNSName,
+			UpdatedAt: worker.UpdatedAt,
+		}
+		if device, ok := lookupTailscaleDevice(deviceByKey, worker.Name, worker.Host, worker.DNSName); ok {
+			row.InTailscale = true
+			row.OnlineKnown = true
+			row.Online = device.Online
+			row.DNSName = firstNonEmpty(row.DNSName, device.DNSName)
+			row.TailscaleIPs = device.TailscaleIPs
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	return rows, tailscaleErr, nil
+}
+
+func buildWorkerConfig(ctx context.Context, opts *options, raw, name, sshUser, sshTarget string) (registry.WorkerConfig, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return registry.WorkerConfig{}, output.NewError("WORKER_REQUIRED", "worker host is required", "")
+	}
+	inputUser, inputHost, hasInputUser := splitWorkerTarget(raw)
+	host := inputHost
+	if host == "" {
+		host = raw
+	}
+	devices, _ := discoverTailscaleDevices(ctx)
+	device, foundDevice := findTailscaleDevice(devices, host)
+	if foundDevice {
+		host = workerSSHHost(firstNonEmpty(device.Host, host), device.DNSName)
+	}
+	if sshTarget != "" {
+		targetUser, targetHost, hasTargetUser := splitWorkerTarget(sshTarget)
+		if hasTargetUser {
+			inputUser = targetUser
+			hasInputUser = true
+		}
+		if targetHost != "" {
+			host = targetHost
+		}
+	}
+	if sshUser == "" {
+		if hasInputUser {
+			sshUser = inputUser
+		} else {
+			sshUser = currentUsername()
+		}
+	}
+	if sshUser == "" {
+		return registry.WorkerConfig{}, output.NewError("WORKER_USER_REQUIRED", "could not infer SSH username", "Pass --user <ssh-user>")
+	}
+	if name == "" {
+		if foundDevice {
+			name = defaultWorkerName(device, host)
+		} else {
+			name = workerDisplayName(host)
+		}
+	}
+	worker := registry.WorkerConfig{
+		Name:   name,
+		Host:   host,
+		User:   sshUser,
+		Source: "manual",
+	}
+	if foundDevice {
+		worker.Source = "tailscale"
+		worker.DNSName = device.DNSName
+		worker.TailscaleIPs = device.TailscaleIPs
+	}
+	if sshTarget != "" {
+		worker.SSHTarget = sshTarget
+	}
+	return worker, nil
+}
+
+func mergeWorkerDiscovery(devices []tailscaleDevice, registered []registry.WorkerConfig) []workerDiscoveryRow {
+	registeredByKey := map[string]registry.WorkerConfig{}
+	for _, worker := range registered {
+		for _, key := range workerKeys(worker.Name, worker.Host, worker.DNSName, worker.EffectiveSSHTarget()) {
+			registeredByKey[key] = worker
+		}
+	}
+	seenRegistered := map[string]bool{}
+	rows := make([]workerDiscoveryRow, 0, len(devices)+len(registered))
+	for _, device := range devices {
+		row := workerDiscoveryRow{
+			Name:         device.Name,
+			Host:         device.Host,
+			DNSName:      device.DNSName,
+			TailscaleIPs: device.TailscaleIPs,
+			OS:           device.OS,
+			Online:       device.Online,
+			Self:         device.Self,
+			Source:       "tailscale",
+		}
+		if worker, ok := lookupRegisteredWorker(registeredByKey, device.Name, device.Host, device.DNSName); ok {
+			row.Tracked = true
+			row.SSHTarget = worker.EffectiveSSHTarget()
+			seenRegistered[worker.Name] = true
+		}
+		rows = append(rows, row)
+	}
+	for _, worker := range registered {
+		if seenRegistered[worker.Name] {
+			continue
+		}
+		rows = append(rows, workerDiscoveryRow{
+			Name:      worker.Name,
+			Host:      worker.Host,
+			DNSName:   worker.DNSName,
+			Tracked:   true,
+			SSHTarget: worker.EffectiveSSHTarget(),
+			Source:    firstNonEmpty(worker.Source, "manual"),
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Tracked != rows[j].Tracked {
+			return rows[i].Tracked && !rows[j].Tracked
+		}
+		return rows[i].Name < rows[j].Name
+	})
+	return rows
+}
+
+func resolveWorkerTarget(stateDir, value string) (string, error) {
+	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
+	worker, ok, err := store.Resolve(value)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return worker.EffectiveSSHTarget(), nil
+	}
+	return value, nil
+}
+
+func discoverTailscaleDevices(ctx context.Context) ([]tailscaleDevice, error) {
+	if _, err := exec.LookPath("tailscale"); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tailscale", "status", "--json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var status tailscaleStatusOutput
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		return nil, fmt.Errorf("decode tailscale status: %w", err)
+	}
+	var devices []tailscaleDevice
+	if status.Self != nil {
+		devices = append(devices, tailscaleDeviceFromPeer(*status.Self, true))
+	}
+	for _, peer := range status.Peer {
+		devices = append(devices, tailscaleDeviceFromPeer(peer, false))
+	}
+	sort.Slice(devices, func(i, j int) bool { return devices[i].Name < devices[j].Name })
+	return devices, nil
+}
+
+func tailscaleDeviceFromPeer(peer tailscalePeerStatus, self bool) tailscaleDevice {
+	dns := strings.TrimSuffix(strings.TrimSpace(peer.DNSName), ".")
+	host := strings.TrimSpace(peer.HostName)
+	if host == "" {
+		host = dns
+	}
+	name := workerDisplayName(host)
+	if name == "" && len(peer.TailscaleIPs) > 0 {
+		name = peer.TailscaleIPs[0]
+	}
+	return tailscaleDevice{
+		Name:         name,
+		Host:         host,
+		DNSName:      dns,
+		OS:           peer.OS,
+		Online:       peer.Online,
+		Self:         self,
+		TailscaleIPs: append([]string(nil), peer.TailscaleIPs...),
+	}
+}
+
+func findTailscaleDevice(devices []tailscaleDevice, value string) (tailscaleDevice, bool) {
+	deviceMap := tailscaleDeviceMap(devices)
+	return lookupTailscaleDevice(deviceMap, value)
+}
+
+func tailscaleDeviceMap(devices []tailscaleDevice) map[string]tailscaleDevice {
+	out := map[string]tailscaleDevice{}
+	for _, device := range devices {
+		for _, key := range workerKeys(device.Name, device.Host, device.DNSName) {
+			out[key] = device
+		}
+	}
+	return out
+}
+
+func lookupTailscaleDevice(devices map[string]tailscaleDevice, values ...string) (tailscaleDevice, bool) {
+	for _, key := range workerKeys(values...) {
+		if device, ok := devices[key]; ok {
+			return device, true
+		}
+	}
+	return tailscaleDevice{}, false
+}
+
+func lookupRegisteredWorker(workers map[string]registry.WorkerConfig, values ...string) (registry.WorkerConfig, bool) {
+	for _, key := range workerKeys(values...) {
+		if worker, ok := workers[key]; ok {
+			return worker, true
+		}
+	}
+	return registry.WorkerConfig{}, false
+}
+
+func workerKeys(values ...string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSuffix(strings.TrimSpace(value), ".")
+		if value == "" {
+			continue
+		}
+		candidates := []string{value}
+		if strings.Contains(value, "@") {
+			_, host, ok := splitWorkerTarget(value)
+			if ok {
+				candidates = append(candidates, host)
+			}
+		}
+		if strings.Contains(value, ".") {
+			candidates = append(candidates, strings.Split(value, ".")[0])
+		}
+		for _, candidate := range candidates {
+			key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(candidate), "."))
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func splitWorkerTarget(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	parts := strings.Split(value, "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", value, false
+	}
+	return parts[0], parts[1], true
+}
+
+func currentUsername() string {
+	for _, key := range []string{"USER", "LOGNAME"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	if current, err := osuser.Current(); err == nil && current != nil {
+		if value := strings.TrimSpace(current.Username); value != "" {
+			if strings.Contains(value, "\\") {
+				parts := strings.Split(value, "\\")
+				return parts[len(parts)-1]
+			}
+			return value
+		}
+	}
+	return ""
+}
+
+func workerWithTarget(worker registry.WorkerConfig) map[string]any {
+	return map[string]any{
+		"name":         worker.Name,
+		"host":         worker.Host,
+		"user":         worker.User,
+		"sshTarget":    worker.EffectiveSSHTarget(),
+		"source":       worker.Source,
+		"dnsName":      worker.DNSName,
+		"tailscaleIPs": worker.TailscaleIPs,
+		"registeredAt": worker.RegisteredAt,
+		"updatedAt":    worker.UpdatedAt,
+	}
+}
+
+func workerDisplayName(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.Contains(value, "@") {
+		_, host, ok := splitWorkerTarget(value)
+		if ok {
+			value = host
+		}
+	}
+	value = strings.TrimSuffix(value, ".")
+	if strings.Contains(value, ".") {
+		return strings.Split(value, ".")[0]
+	}
+	return value
+}
+
+func defaultWorkerName(device tailscaleDevice, host string) string {
+	for _, value := range []string{device.Name, workerDisplayName(device.DNSName), workerDisplayName(host)} {
+		if name := sanitizeWorkerName(value); name != "" {
+			return name
+		}
+	}
+	return sanitizeWorkerName(firstString(device.TailscaleIPs))
+}
+
+func sanitizeWorkerName(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-'
+		if ok {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if r == '.' {
+			break
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func workerSSHHost(host, dnsName string) string {
+	host = strings.TrimSpace(host)
+	if host != "" && !strings.ContainsAny(host, " \t/\\@:;|&<>`'\"") {
+		return host
+	}
+	return firstNonEmpty(strings.TrimSuffix(strings.TrimSpace(dnsName), "."), host)
+}
+
+func formatTime(value time.Time) string {
+	if value.IsZero() {
+		return "-"
+	}
+	return value.Format(time.RFC3339)
+}
+
+func optionalBool(known, value bool) string {
+	if !known {
+		return "unknown"
+	}
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	return values[0]
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func cleanupCommand(opts *options) *cobra.Command {
@@ -424,15 +1077,17 @@ func doctorCommand(opts *options) *cobra.Command {
 
 func printDoctorReport(w io.Writer, report doctor.Report) {
 	_, _ = fmt.Fprintln(w, "workyard doctor")
-	_, _ = fmt.Fprintln(w, "CHECK                         STATUS  MESSAGE")
+	rows := make([][]string, 0, len(report.Checks))
 	for _, check := range report.Checks {
-		status := strings.ToUpper(check.Status)
-		_, _ = fmt.Fprintf(w, "%-29s %-7s %s\n", check.Name, status, check.Message)
+		rows = append(rows, []string{check.Name, strings.ToUpper(check.Status), check.Message})
+	}
+	_ = output.WriteTable(w, []string{"CHECK", "STATUS", "MESSAGE"}, rows)
+	for _, check := range report.Checks {
 		if check.Detail != "" {
-			_, _ = fmt.Fprintf(w, "  detail: %s\n", check.Detail)
+			_, _ = fmt.Fprintf(w, "  %s detail: %s\n", check.Name, check.Detail)
 		}
 		if check.Hint != "" && check.Status != doctor.StatusPass {
-			_, _ = fmt.Fprintf(w, "  hint: %s\n", check.Hint)
+			_, _ = fmt.Fprintf(w, "  %s hint: %s\n", check.Name, check.Hint)
 		}
 	}
 	if report.OK {
@@ -712,12 +1367,12 @@ func servicesCommand(opts *options) *cobra.Command {
 				}
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "services": services})
 			}
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "SERVICE  PATH  START COMMAND  PORT")
+			rows := make([][]string, 0, len(names))
 			for _, name := range names {
 				svc := loaded.Config.Services[name]
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %s  %d\n", name, svc.Path, svc.StartCommand, svc.Port.Default)
+				rows = append(rows, []string{name, svc.Path, svc.StartCommand, fmt.Sprint(svc.Port.Default)})
 			}
-			return nil
+			return output.WriteTable(cmd.OutOrStdout(), []string{"SERVICE", "PATH", "START COMMAND", "PORT"}, rows)
 		},
 	}
 }
@@ -1096,10 +1751,11 @@ func printDeployURLs(w io.Writer, urls []worker.PreviewURL) {
 		_, _ = fmt.Fprintln(w, "no urls")
 		return
 	}
-	_, _ = fmt.Fprintln(w, "SERVICE  URL  HEALTHY")
+	rows := make([][]string, 0, len(urls))
 	for _, url := range urls {
-		_, _ = fmt.Fprintf(w, "%s  %s  %t\n", url.Service, url.URL, url.Healthy)
+		rows = append(rows, []string{url.Service, url.URL, fmt.Sprint(url.Healthy)})
 	}
+	_ = output.WriteTable(w, []string{"SERVICE", "URL", "HEALTHY"}, rows)
 }
 
 func syncCommand(opts *options) *cobra.Command {
@@ -2019,10 +2675,11 @@ func printDaemonResponse(w io.Writer, res worker.Response, jsonOut bool, action 
 	case "setup", "build":
 		_, _ = fmt.Fprintln(w, res.Message)
 	default:
-		_, _ = fmt.Fprintln(w, "SERVICE  STATUS  HEALTHY  PID  PORT  URL")
+		rows := make([][]string, 0, len(res.Services))
 		for _, svc := range res.Services {
-			_, _ = fmt.Fprintf(w, "%s  %s  %t  %d  %d  %s\n", svc.Name, svc.Status, svc.Healthy, svc.PID, svc.AssignedPort, svc.URL)
+			rows = append(rows, []string{svc.Name, svc.Status, fmt.Sprint(svc.Healthy), fmt.Sprint(svc.PID), fmt.Sprint(svc.AssignedPort), svc.URL})
 		}
+		return output.WriteTable(w, []string{"SERVICE", "STATUS", "HEALTHY", "PID", "PORT", "URL"}, rows)
 	}
 	return nil
 }
