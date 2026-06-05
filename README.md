@@ -180,16 +180,16 @@ workyard --worker user@worker-host cleanup run
 
 ## Dashboard
 
-Workyard can run a local monitor server with an embedded dashboard:
+Workyard can run a local monitor UI with an embedded dashboard:
 
 ```sh
-workyard server --open
+workyard ui --open
 ```
 
-The server listens on `127.0.0.1:3099` by default. Use another loopback port if needed:
+The UI listens on `127.0.0.1:3099` by default. Use another loopback port if needed:
 
 ```sh
-workyard server --listen 127.0.0.1:32200 --open
+workyard ui --listen 127.0.0.1:32200 --open
 ```
 
 The dashboard is backed by local JSON APIs:
@@ -546,7 +546,7 @@ Cleanup and utility commands:
 ```sh
 workyard --worker user@worker-host cleanup logs
 workyard --worker user@worker-host cleanup run
-workyard server --open
+workyard ui --open
 workyard version
 workyard completion zsh
 ```

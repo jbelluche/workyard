@@ -126,7 +126,7 @@ func validateListen(addr string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("workyard server only listens on loopback addresses; got %s", addr)
+		return fmt.Errorf("workyard ui only listens on loopback addresses; got %s", addr)
 	}
 	return nil
 }

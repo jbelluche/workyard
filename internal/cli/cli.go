@@ -35,6 +35,16 @@ import (
 
 const Version = "0.1.0"
 
+const (
+	commandGroupPrimary     = "primary"
+	commandGroupConfig      = "config"
+	commandGroupLifecycle   = "lifecycle"
+	commandGroupInspection  = "inspection"
+	commandGroupWorkers     = "workers"
+	commandGroupMaintenance = "maintenance"
+	commandGroupUtility     = "utility"
+)
+
 type options struct {
 	json         bool
 	quiet        bool
@@ -99,6 +109,7 @@ func ExitCode(err error) int {
 }
 
 func newRoot(opts *options) *cobra.Command {
+	cobra.EnableCommandSorting = false
 	root := &cobra.Command{
 		Use:           "workyard",
 		Short:         "Agent-first remote development runner",
@@ -127,35 +138,58 @@ func newRoot(opts *options) *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.socket, "socket", "", "daemon Unix socket path")
 	root.PersistentFlags().StringVar(&opts.stateDir, "state-dir", "", "worker state directory")
 
-	root.AddCommand(initCommand(opts))
-	root.AddCommand(doctorCommand(opts))
-	root.AddCommand(configCommand(opts))
-	root.AddCommand(servicesCommand(opts))
-	root.AddCommand(deployCommand(opts))
-	root.AddCommand(syncCommand(opts))
-	root.AddCommand(installCommand(opts))
-	root.AddCommand(daemonCommand(opts))
+	root.AddGroup(
+		&cobra.Group{ID: commandGroupPrimary, Title: "Primary Workflows"},
+		&cobra.Group{ID: commandGroupConfig, Title: "Project Configuration"},
+		&cobra.Group{ID: commandGroupLifecycle, Title: "Lifecycle Steps"},
+		&cobra.Group{ID: commandGroupInspection, Title: "Runtime Inspection"},
+		&cobra.Group{ID: commandGroupWorkers, Title: "Worker Management"},
+		&cobra.Group{ID: commandGroupMaintenance, Title: "Run Maintenance"},
+		&cobra.Group{ID: commandGroupUtility, Title: "Utility"},
+	)
+	root.SetHelpCommandGroupID(commandGroupUtility)
+	root.SetCompletionCommandGroupID(commandGroupUtility)
+
+	root.AddCommand(groupCommand(deployCommand(opts), commandGroupPrimary))
+	root.AddCommand(groupCommand(watchCommand(opts), commandGroupPrimary))
+
+	root.AddCommand(groupCommand(initCommand(opts), commandGroupConfig))
+	root.AddCommand(groupCommand(configCommand(opts), commandGroupConfig))
+	root.AddCommand(groupCommand(servicesCommand(opts), commandGroupConfig))
+
+	root.AddCommand(groupCommand(syncCommand(opts), commandGroupLifecycle))
+	root.AddCommand(groupCommand(controlCommand(opts, "setup"), commandGroupLifecycle))
+	root.AddCommand(groupCommand(controlCommand(opts, "build"), commandGroupLifecycle))
+	root.AddCommand(groupCommand(controlCommand(opts, "start"), commandGroupLifecycle))
+	root.AddCommand(groupCommand(controlCommand(opts, "stop"), commandGroupLifecycle))
+	root.AddCommand(groupCommand(controlCommand(opts, "restart"), commandGroupLifecycle))
+	root.AddCommand(groupCommand(waitCommand(opts), commandGroupLifecycle))
+	root.AddCommand(groupCommand(controlCommand(opts, "probe"), commandGroupLifecycle))
+
+	root.AddCommand(groupCommand(controlCommand(opts, "status"), commandGroupInspection))
+	root.AddCommand(groupCommand(controlCommand(opts, "inspect"), commandGroupInspection))
+	root.AddCommand(groupCommand(logsCommand(opts), commandGroupInspection))
+	root.AddCommand(groupCommand(eventsCommand(opts), commandGroupInspection))
+	root.AddCommand(groupCommand(controlCommand(opts, "urls"), commandGroupInspection))
+	root.AddCommand(groupCommand(openCommand(opts), commandGroupInspection))
+	root.AddCommand(groupCommand(uiCommand(opts), commandGroupInspection))
+
+	root.AddCommand(groupCommand(workersCommand(opts), commandGroupWorkers))
+	root.AddCommand(groupCommand(installCommand(opts), commandGroupWorkers))
+	root.AddCommand(groupCommand(doctorCommand(opts), commandGroupWorkers))
+	root.AddCommand(groupCommand(daemonCommand(opts), commandGroupWorkers))
+
+	root.AddCommand(groupCommand(runsCommand(opts), commandGroupMaintenance))
+	root.AddCommand(groupCommand(cleanupCommand(opts), commandGroupMaintenance))
+
+	root.AddCommand(groupCommand(versionCommand(opts), commandGroupUtility))
 	root.AddCommand(daemonctlCommand(opts))
-	root.AddCommand(controlCommand(opts, "setup"))
-	root.AddCommand(controlCommand(opts, "build"))
-	root.AddCommand(controlCommand(opts, "start"))
-	root.AddCommand(controlCommand(opts, "stop"))
-	root.AddCommand(controlCommand(opts, "restart"))
-	root.AddCommand(controlCommand(opts, "status"))
-	root.AddCommand(logsCommand(opts))
-	root.AddCommand(eventsCommand(opts))
-	root.AddCommand(controlCommand(opts, "inspect"))
-	root.AddCommand(waitCommand(opts))
-	root.AddCommand(controlCommand(opts, "urls"))
-	root.AddCommand(controlCommand(opts, "probe"))
-	root.AddCommand(watchCommand(opts))
-	root.AddCommand(openCommand(opts))
-	root.AddCommand(runsCommand(opts))
-	root.AddCommand(workersCommand(opts))
-	root.AddCommand(cleanupCommand(opts))
-	root.AddCommand(serverCommand(opts))
-	root.AddCommand(versionCommand(opts))
 	return root
+}
+
+func groupCommand(cmd *cobra.Command, groupID string) *cobra.Command {
+	cmd.GroupID = groupID
+	return cmd
 }
 
 func installCommand(opts *options) *cobra.Command {
@@ -1381,14 +1415,15 @@ func zeroBytes(value []byte) {
 	}
 }
 
-func serverCommand(opts *options) *cobra.Command {
+func uiCommand(opts *options) *cobra.Command {
 	var listen string
 	var refreshInterval time.Duration
 	var open bool
 	var autoStartDaemon bool
 	cmd := &cobra.Command{
-		Use:   "server",
-		Short: "Run the local Workyard monitor server",
+		Use:     "ui",
+		Aliases: []string{"server"},
+		Short:   "Run the local Workyard monitor UI",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if listen == "" {
 				listen = "127.0.0.1:3099"
@@ -1406,7 +1441,7 @@ func serverCommand(opts *options) *cobra.Command {
 					return err
 				}
 			} else if !opts.quiet {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "workyard server listening on http://%s\n", listen)
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "workyard ui listening on http://%s\n", listen)
 			}
 			return monitor.Serve(cmd.Context(), monitor.ServerOptions{
 				Listen:          listen,
@@ -1419,7 +1454,7 @@ func serverCommand(opts *options) *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:3099", "loopback address for the monitor server")
+	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:3099", "loopback address for the monitor UI")
 	cmd.Flags().DurationVar(&refreshInterval, "refresh-interval", 3*time.Second, "worker polling interval")
 	cmd.Flags().BoolVar(&open, "open", false, "open the dashboard in a browser")
 	cmd.Flags().BoolVar(&autoStartDaemon, "auto-start-daemon", true, "start a private remote worker daemon when needed")
@@ -1706,7 +1741,7 @@ func deployCommand(opts *options) *cobra.Command {
 	var d deployOptions
 	cmd := &cobra.Command{
 		Use:   "deploy [project-path|workyard.yaml] [service...]",
-		Short: "Deploy a project to a worker",
+		Short: "Run the full deploy flow for a project",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDeploy(cmd, opts, d, args)
@@ -2219,7 +2254,7 @@ func syncCommand(opts *options) *cobra.Command {
 	var deleteRemote bool
 	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Sync the project to a worker",
+		Short: "Copy project files into a worker run directory",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := requireWorker(opts, "sync"); err != nil {
 				return err
@@ -2555,15 +2590,40 @@ func controlCommand(opts *options, action string) *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
 		Use:   use,
-		Short: action + " services",
+		Short: controlCommandShort(action),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControl(cmd, opts, action, args, controlExtra{All: all})
 		},
 	}
 	if action == "stop" {
-		cmd.Flags().BoolVar(&all, "all", false, "stop all services")
+		cmd.Flags().BoolVar(&all, "all", false, "Stop all services")
 	}
 	return cmd
+}
+
+func controlCommandShort(action string) string {
+	switch action {
+	case "setup":
+		return "Run the configured setup command for a project run"
+	case "build":
+		return "Run the configured build command for a project run"
+	case "start":
+		return "Start one or more services on a worker"
+	case "stop":
+		return "Stop one or more services on a worker"
+	case "restart":
+		return "Restart one or more services on a worker"
+	case "status":
+		return "Show current service status for a run"
+	case "inspect":
+		return "Show detailed service state, hints, and recent events"
+	case "urls":
+		return "Show service preview URLs for a run"
+	case "probe":
+		return "Probe a service health endpoint from the worker"
+	default:
+		return "Manage services on a worker"
+	}
 }
 
 func logsCommand(opts *options) *cobra.Command {
@@ -2753,7 +2813,7 @@ func waitCommand(opts *options) *cobra.Command {
 	var timeout string
 	cmd := &cobra.Command{
 		Use:   "wait <service...>",
-		Short: "Wait for service state",
+		Short: "Wait for service state or health",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControl(cmd, opts, "wait", args, controlExtra{Healthy: healthy, Status: status, Timeout: timeout})
