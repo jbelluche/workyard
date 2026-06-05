@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackbelluche/workyard/internal/config"
+	"github.com/jackbelluche/workyard/internal/registry"
 	"github.com/jackbelluche/workyard/internal/remote"
+	"github.com/jackbelluche/workyard/internal/worker"
 )
 
 const (
@@ -28,6 +33,8 @@ type Options struct {
 	Version      string
 	CheckProject bool
 	Timeout      time.Duration
+	StateDir     string
+	Socket       string
 }
 
 type Report struct {
@@ -107,17 +114,23 @@ func Run(ctx context.Context, opts Options, runner Runner) Report {
 	}
 	if strings.TrimSpace(opts.Worker) != "" {
 		worker := strings.TrimSpace(opts.Worker)
-		ssh := workerSSH(ctx, runner, worker, opts.Timeout)
-		report.add(ssh)
-		if ssh.Status == StatusPass {
-			home, err := workerHome(ctx, runner, worker, opts.Timeout)
-			if err != nil {
-				report.add(Check{Name: "worker.home", Status: StatusFail, Required: true, Message: "worker home directory could not be read", Detail: err.Error(), Hint: "Check SSH access and the worker shell environment"})
-			} else {
-				report.add(workerBinary(ctx, runner, worker, home, opts.RemoteBinary, version, opts.Timeout))
-				report.add(workerDaemonPing(ctx, runner, worker, home, opts.RemoteBinary, opts.Timeout))
-				report.add(workerRunRootPermissions(ctx, runner, worker, home, opts.RemoteRoot, opts.Timeout))
-				report.add(workerPortRangeAvailable(ctx, runner, worker, configuredPortRange(opts.Project), opts.Timeout))
+		if registry.IsLocalWorker(worker) {
+			for _, check := range localWorkerChecks(opts) {
+				report.add(check)
+			}
+		} else {
+			ssh := workerSSH(ctx, runner, worker, opts.Timeout)
+			report.add(ssh)
+			if ssh.Status == StatusPass {
+				home, err := workerHome(ctx, runner, worker, opts.Timeout)
+				if err != nil {
+					report.add(Check{Name: "worker.home", Status: StatusFail, Required: true, Message: "worker home directory could not be read", Detail: err.Error(), Hint: "Check SSH access and the worker shell environment"})
+				} else {
+					report.add(workerBinary(ctx, runner, worker, home, opts.RemoteBinary, version, opts.Timeout))
+					report.add(workerDaemonPing(ctx, runner, worker, home, opts.RemoteBinary, opts.Timeout))
+					report.add(workerRunRootPermissions(ctx, runner, worker, home, opts.RemoteRoot, opts.Timeout))
+					report.add(workerPortRangeAvailable(ctx, runner, worker, configuredPortRange(opts.Project), opts.Timeout))
+				}
 			}
 		}
 	}
@@ -284,6 +297,98 @@ func projectConfig(project string) Check {
 		}
 	}
 	return Check{Name: "workyard.config", Status: StatusPass, Required: false, Message: "workyard.yaml is valid", Detail: detail}
+}
+
+func localWorkerChecks(opts Options) []Check {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return []Check{{
+			Name:     "worker.local",
+			Status:   StatusFail,
+			Required: true,
+			Message:  "local worker home directory could not be read",
+			Detail:   err.Error(),
+		}}
+	}
+	return []Check{
+		{Name: "worker.local", Status: StatusPass, Required: true, Message: "local worker selected", Detail: registry.LocalWorkerName + ":" + home},
+		localDaemonPing(opts),
+		localRunRootPermissions(home, opts.RemoteRoot),
+		localPortRangeAvailable(configuredPortRange(opts.Project)),
+	}
+}
+
+func localDaemonPing(opts Options) Check {
+	socket := opts.Socket
+	if strings.TrimSpace(socket) == "" {
+		socket = localDaemonSocket(opts.StateDir)
+	}
+	res, err := worker.Call(socket, worker.Request{Action: "ping"})
+	if err != nil {
+		return Check{
+			Name:     "worker.daemon",
+			Status:   StatusWarn,
+			Required: false,
+			Message:  "local worker daemon did not respond to ping",
+			Detail:   err.Error(),
+			Hint:     "Run workyard daemon start",
+		}
+	}
+	return Check{Name: "worker.daemon", Status: StatusPass, Required: false, Message: "local worker daemon responded to ping", Detail: firstLine(res.Message)}
+}
+
+func localRunRootPermissions(home, remoteRoot string) Check {
+	runsRoot, err := runsRootPath(filepath.ToSlash(home), remoteRoot)
+	if err != nil {
+		return Check{Name: "worker.runRoot", Status: StatusFail, Required: true, Message: "local worker run root is invalid", Detail: err.Error(), Hint: "Use a run root under ~/.workyard/runs"}
+	}
+	root := filepath.FromSlash(runsRoot)
+	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return Check{Name: "worker.runRoot", Status: StatusFail, Required: true, Message: "local worker run root is a symlink", Detail: root, Hint: "Use a private real directory under ~/.workyard/runs"}
+	} else if err != nil && !os.IsNotExist(err) {
+		return Check{Name: "worker.runRoot", Status: StatusFail, Required: true, Message: "local worker run root could not be checked", Detail: err.Error()}
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return Check{Name: "worker.runRoot", Status: StatusFail, Required: true, Message: "local worker run root is not writable", Detail: err.Error(), Hint: "Create a private writable run root under ~/.workyard/runs"}
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return Check{Name: "worker.runRoot", Status: StatusFail, Required: true, Message: "local worker run root could not be checked", Detail: err.Error()}
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return Check{Name: "worker.runRoot", Status: StatusFail, Required: true, Message: "local worker run root permissions are too broad", Detail: fmt.Sprintf("%s mode %o", root, info.Mode().Perm()), Hint: "Run chmod go-rwx " + root}
+	}
+	tmp, err := os.CreateTemp(root, ".workyard-doctor-*")
+	if err != nil {
+		return Check{Name: "worker.runRoot", Status: StatusFail, Required: true, Message: "local worker run root is not writable", Detail: err.Error(), Hint: "Create a private writable run root under ~/.workyard/runs"}
+	}
+	_ = tmp.Close()
+	_ = os.Remove(tmp.Name())
+	return Check{Name: "worker.runRoot", Status: StatusPass, Required: true, Message: "local worker run root is private and writable", Detail: fmt.Sprintf("%s mode %o", root, info.Mode().Perm())}
+}
+
+func localPortRangeAvailable(rawRange string) Check {
+	start, end, err := parsePortRange(rawRange)
+	if err != nil {
+		return Check{Name: "worker.ports", Status: StatusFail, Required: true, Message: "local worker port range is invalid", Detail: err.Error(), Hint: "Set worker.portRange to a range like 3100-3999"}
+	}
+	for port := start; port <= end; port++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		return Check{Name: "worker.ports", Status: StatusPass, Required: true, Message: "local worker port range has at least one available port", Detail: strconv.Itoa(port)}
+	}
+	return Check{Name: "worker.ports", Status: StatusFail, Required: true, Message: "no available port was found in the local worker range", Hint: "Free a port in " + rawRange + " or adjust worker.portRange"}
+}
+
+func localDaemonSocket(stateDir string) string {
+	if strings.TrimSpace(stateDir) == "" {
+		home, _ := os.UserHomeDir()
+		stateDir = filepath.Join(home, ".workyard")
+	}
+	return filepath.Join(stateDir, "daemon", "workyard.sock")
 }
 
 func workerSSH(ctx context.Context, runner Runner, worker string, timeout time.Duration) Check {

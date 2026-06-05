@@ -13,7 +13,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const WorkersFileName = "workers.yaml"
+const (
+	WorkersFileName = "workers.yaml"
+	LocalWorkerName = "localhost"
+)
 
 type WorkerConfig struct {
 	Name         string    `yaml:"name" json:"name"`
@@ -221,6 +224,9 @@ func (s WorkerStore) save(file WorkersFile) error {
 }
 
 func validateWorkerConfig(worker WorkerConfig) error {
+	if IsLocalWorker(worker.Name) || IsLocalWorker(worker.Host) || IsLocalWorker(worker.SSHTarget) {
+		return fmt.Errorf("%s is reserved as the built-in local worker", LocalWorkerName)
+	}
 	for label, value := range map[string]string{
 		"name": worker.Name,
 		"host": worker.Host,
@@ -263,6 +269,10 @@ func sortWorkers(workers []WorkerConfig) {
 
 func trimDNSName(value string) string {
 	return strings.TrimSuffix(strings.TrimSpace(value), ".")
+}
+
+func IsLocalWorker(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), LocalWorkerName)
 }
 
 func legacyWorkersJSONPath(path string) string {

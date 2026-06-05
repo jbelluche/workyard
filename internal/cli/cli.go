@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	osuser "os/user"
@@ -167,6 +168,9 @@ func installCommand(opts *options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if opts.worker == "" {
 				return output.NewError("WORKER_REQUIRED", "--worker is required for install", "")
+			}
+			if registry.IsLocalWorker(opts.worker) {
+				return output.NewError("WORKER_LOCAL_INSTALL_UNSUPPORTED", "install is only needed for remote workers", "Use the local install script to update this machine")
 			}
 			platform, err := remote.DetectPlatform(cmd.Context(), opts.worker)
 			if err != nil {
@@ -365,6 +369,9 @@ func workersCommand(opts *options) *cobra.Command {
 		Short: "Remove a registered worker and its local run references",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if registry.IsLocalWorker(args[0]) {
+				return output.NewError("WORKER_RESERVED", registry.LocalWorkerName+" is a built-in worker and cannot be removed", "Use workyard runs remove or workyard runs prune to clean local run references")
+			}
 			workerStore := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
 			runStore := registry.New(registry.DefaultPath(opts.stateDir))
 			ref, ok, err := workerStore.Resolve(args[0])
@@ -563,7 +570,22 @@ func workerListRows(opts *options) ([]workerListRow, error) {
 		runCounts[ref.Worker] = ref
 	}
 	seen := map[string]bool{}
-	rows := make([]workerListRow, 0, len(registered)+len(runWorkers))
+	rows := make([]workerListRow, 0, len(registered)+len(runWorkers)+1)
+	localRunCount := 0
+	var localUpdated time.Time
+	if ref, ok := runCounts[registry.LocalWorkerName]; ok {
+		localRunCount = ref.RunCount
+		localUpdated = ref.UpdatedAt
+	}
+	rows = append(rows, workerListRow{
+		Name:      registry.LocalWorkerName,
+		Host:      registry.LocalWorkerName,
+		SSHTarget: "local",
+		Source:    "builtin",
+		RunCount:  localRunCount,
+		UpdatedAt: localUpdated,
+	})
+	seen[registry.LocalWorkerName] = true
 	for _, worker := range registered {
 		target := worker.EffectiveSSHTarget()
 		runCount := 0
@@ -624,7 +646,17 @@ func registeredWorkerStatusRows(ctx context.Context, opts *options) ([]workerSta
 	}
 	devices, tailscaleErr := discoverTailscaleDevices(ctx)
 	deviceByKey := tailscaleDeviceMap(devices)
-	rows := make([]workerStatusRow, 0, len(registered))
+	rows := make([]workerStatusRow, 0, len(registered)+1)
+	rows = append(rows, workerStatusRow{
+		Name:        registry.LocalWorkerName,
+		Host:        registry.LocalWorkerName,
+		User:        currentUsername(),
+		SSHTarget:   "local",
+		Source:      "builtin",
+		Online:      true,
+		OnlineKnown: true,
+		InTailscale: false,
+	})
 	for _, worker := range registered {
 		row := workerStatusRow{
 			Name:      worker.Name,
@@ -652,6 +684,9 @@ func buildWorkerConfig(ctx context.Context, opts *options, raw, name, sshUser, s
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return registry.WorkerConfig{}, output.NewError("WORKER_REQUIRED", "worker host is required", "")
+	}
+	if registry.IsLocalWorker(raw) || registry.IsLocalWorker(name) || registry.IsLocalWorker(sshTarget) {
+		return registry.WorkerConfig{}, output.NewError("WORKER_RESERVED", registry.LocalWorkerName+" is reserved as the built-in local worker", "Use --worker localhost directly for local runs")
 	}
 	inputUser, inputHost, hasInputUser := splitWorkerTarget(raw)
 	host := inputHost
@@ -757,6 +792,9 @@ func mergeWorkerDiscovery(devices []tailscaleDevice, registered []registry.Worke
 }
 
 func resolveWorkerTarget(stateDir, value string) (string, error) {
+	if registry.IsLocalWorker(value) {
+		return registry.LocalWorkerName, nil
+	}
 	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
 	worker, ok, err := store.Resolve(value)
 	if err != nil {
@@ -1010,24 +1048,33 @@ func firstNonEmpty(values ...string) string {
 }
 
 func cleanupCommand(opts *options) *cobra.Command {
-	root := &cobra.Command{Use: "cleanup", Aliases: []string{"clean"}, Short: "Safely clean remote Workyard runs and logs"}
+	root := &cobra.Command{Use: "cleanup", Aliases: []string{"clean"}, Short: "Safely clean Workyard runs and logs"}
 	logsCmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Truncate remote log files for the selected run",
+		Short: "Truncate log files for the selected run",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			loaded, paths, err := cleanupPaths(cmd, opts)
 			if err != nil {
 				return err
 			}
 			_ = loaded
-			res, err := remote.CleanupLogs(cmd.Context(), opts.worker, paths)
+			var res remote.CleanupResult
+			if registry.IsLocalWorker(opts.worker) {
+				res, err = cleanupLocalLogs(paths)
+			} else {
+				res, err = remote.CleanupLogs(cmd.Context(), opts.worker, paths)
+			}
 			if err != nil {
-				return output.NewError("REMOTE_LOG_CLEANUP_FAILED", err.Error(), "")
+				return output.NewError("LOG_CLEANUP_FAILED", err.Error(), "")
 			}
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), res)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "cleaned logs at %s:%s\n", res.Worker, res.RemoteLogPath)
+			if registry.IsLocalWorker(res.Worker) {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "cleaned logs at %s\n", res.RemoteLogPath)
+			} else {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "cleaned logs at %s:%s\n", res.Worker, res.RemoteLogPath)
+			}
 			return nil
 		},
 	}
@@ -1035,7 +1082,7 @@ func cleanupCommand(opts *options) *cobra.Command {
 	noStop := false
 	runCmd := &cobra.Command{
 		Use:   "run",
-		Short: "Stop and remove the selected remote run directory",
+		Short: "Stop and remove the selected run directory",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			loaded, paths, err := cleanupPaths(cmd, opts)
 			if err != nil {
@@ -1045,24 +1092,41 @@ func cleanupCommand(opts *options) *cobra.Command {
 				stopFirst = false
 			}
 			if stopFirst {
-				oldOut := cmd.OutOrStdout()
-				cmd.SetOut(io.Discard)
-				err := remoteControl(cmd, opts, loaded, "stop", paths.RunID, nil, controlExtra{All: true})
-				cmd.SetOut(oldOut)
-				if err != nil {
-					return err
+				if registry.IsLocalWorker(opts.worker) {
+					if _, err := localDaemonCall(cmd.Context(), opts, paths, "stop", nil, controlExtra{All: true}); err != nil {
+						if opts.verbose && !opts.json {
+							_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before cleanup skipped: %s\n", err)
+						}
+					}
+				} else {
+					oldOut := cmd.OutOrStdout()
+					cmd.SetOut(io.Discard)
+					err := remoteControl(cmd, opts, loaded, "stop", paths.RunID, nil, controlExtra{All: true})
+					cmd.SetOut(oldOut)
+					if err != nil {
+						return err
+					}
 				}
 			}
-			res, err := remote.CleanupRun(cmd.Context(), opts.worker, paths)
+			var res remote.CleanupResult
+			if registry.IsLocalWorker(opts.worker) {
+				res, err = cleanupLocalRun(paths)
+			} else {
+				res, err = remote.CleanupRun(cmd.Context(), opts.worker, paths)
+			}
 			if err != nil {
-				return output.NewError("REMOTE_RUN_CLEANUP_FAILED", err.Error(), "")
+				return output.NewError("RUN_CLEANUP_FAILED", err.Error(), "")
 			}
 			store := registry.New(registry.DefaultPath(opts.stateDir))
 			_, _ = store.Remove(opts.worker, paths.Project, paths.RunID)
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), res)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed run at %s:%s\n", res.Worker, res.RemoteRunPath)
+			if registry.IsLocalWorker(res.Worker) {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed run at %s\n", res.RemoteRunPath)
+			} else {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed run at %s:%s\n", res.Worker, res.RemoteRunPath)
+			}
 			return nil
 		},
 	}
@@ -1074,7 +1138,7 @@ func cleanupCommand(opts *options) *cobra.Command {
 
 func cleanupPaths(cmd *cobra.Command, opts *options) (config.Loaded, remote.Paths, error) {
 	if opts.worker == "" {
-		return config.Loaded{}, remote.Paths{}, output.NewError("WORKER_REQUIRED", "--worker is required for remote cleanup", "")
+		return config.Loaded{}, remote.Paths{}, output.NewError("WORKER_REQUIRED", "--worker is required for cleanup", "Pass --worker localhost for this machine or --worker <name> for a registered worker")
 	}
 	loaded, err := config.Load(opts.project)
 	if err != nil {
@@ -1088,15 +1152,117 @@ func cleanupPaths(cmd *cobra.Command, opts *options) (config.Loaded, remote.Path
 	if err != nil {
 		return config.Loaded{}, remote.Paths{}, output.NewError("RUN_ID_INVALID", err.Error(), "")
 	}
-	home, err := remote.Home(cmd.Context(), opts.worker)
-	if err != nil {
-		return config.Loaded{}, remote.Paths{}, output.NewError("SSH_FAILED", err.Error(), "Check Tailscale/SSH connectivity to the worker")
+	var home string
+	if registry.IsLocalWorker(opts.worker) {
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return config.Loaded{}, remote.Paths{}, output.NewError("LOCAL_HOME_FAILED", err.Error(), "")
+		}
+		home = filepath.ToSlash(home)
+	} else {
+		home, err = remote.Home(cmd.Context(), opts.worker)
+		if err != nil {
+			return config.Loaded{}, remote.Paths{}, output.NewError("SSH_FAILED", err.Error(), "Check Tailscale/SSH connectivity to the worker")
+		}
 	}
 	paths, err := remote.BuildPaths(home, opts.remoteRoot, loaded.Config.Name, run)
 	if err != nil {
 		return config.Loaded{}, remote.Paths{}, output.NewError("REMOTE_PATH_INVALID", err.Error(), "")
 	}
 	return loaded, paths, nil
+}
+
+func localRunExists(paths remote.Paths) (bool, error) {
+	root, err := localManagedRunRoot(paths)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("refusing symlink run path: %s", root)
+	}
+	return info.IsDir(), nil
+}
+
+func cleanupLocalRun(paths remote.Paths) (remote.CleanupResult, error) {
+	root, err := localManagedRunRoot(paths)
+	if err != nil {
+		return remote.CleanupResult{}, err
+	}
+	if err := guardLocalManagedPaths(paths); err != nil {
+		return remote.CleanupResult{}, err
+	}
+	if err := os.RemoveAll(root); err != nil {
+		return remote.CleanupResult{}, err
+	}
+	return remote.CleanupResult{OK: true, Worker: registry.LocalWorkerName, RemoteRunPath: paths.RunRoot, Action: "run"}, nil
+}
+
+func cleanupLocalLogs(paths remote.Paths) (remote.CleanupResult, error) {
+	if _, err := localManagedRunRoot(paths); err != nil {
+		return remote.CleanupResult{}, err
+	}
+	if err := guardLocalManagedPaths(paths); err != nil {
+		return remote.CleanupResult{}, err
+	}
+	logs := filepath.FromSlash(paths.Logs)
+	if err := os.MkdirAll(logs, 0o700); err != nil {
+		return remote.CleanupResult{}, err
+	}
+	if err := filepath.WalkDir(logs, func(file string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink log file: %s", file)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if filepath.Ext(file) != ".log" && filepath.Ext(file) != ".jsonl" {
+			return nil
+		}
+		return os.WriteFile(file, nil, 0o600)
+	}); err != nil {
+		return remote.CleanupResult{}, err
+	}
+	return remote.CleanupResult{OK: true, Worker: registry.LocalWorkerName, RemoteRunPath: paths.RunRoot, RemoteLogPath: paths.Logs, Action: "logs"}, nil
+}
+
+func localManagedRunRoot(paths remote.Paths) (string, error) {
+	if strings.TrimSpace(paths.Home) == "" || strings.TrimSpace(paths.RunRoot) == "" {
+		return "", fmt.Errorf("local paths are incomplete")
+	}
+	root := filepath.Clean(filepath.FromSlash(paths.RunRoot))
+	runsRoot := filepath.Clean(filepath.FromSlash(path.Join(paths.Home, ".workyard", "runs")))
+	rel, err := filepath.Rel(runsRoot, root)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return "", fmt.Errorf("run path must stay under %s", runsRoot)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", fmt.Errorf("run path must be exactly under %s/<project>/<run>", runsRoot)
+	}
+	if filepath.Clean(filepath.FromSlash(paths.Logs)) != filepath.Join(root, "logs") {
+		return "", fmt.Errorf("logs path must be inside the run root")
+	}
+	return root, nil
 }
 
 func doctorCommand(opts *options) *cobra.Command {
@@ -1112,6 +1278,8 @@ func doctorCommand(opts *options) *cobra.Command {
 				Version:      Version,
 				CheckProject: true,
 				Timeout:      8 * time.Second,
+				StateDir:     opts.stateDir,
+				Socket:       opts.socket,
 			}, doctor.SystemRunner{})
 			if opts.json {
 				if err := output.WriteJSON(cmd.OutOrStdout(), report); err != nil {
@@ -1265,8 +1433,8 @@ func watchCommand(opts *options) *cobra.Command {
 		Use:   "watch [service...]",
 		Short: "Watch local files, sync changes, and optionally restart services",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if opts.worker == "" {
-				return output.NewError("WORKER_REQUIRED", "--worker is required for watch", "")
+			if err := requireWorker(opts, "watch"); err != nil {
+				return err
 			}
 			loaded, err := config.Load(opts.project)
 			if err != nil {
@@ -1279,6 +1447,17 @@ func watchCommand(opts *options) *cobra.Command {
 			run, err = runid.Validate(run)
 			if err != nil {
 				return output.NewError("RUN_ID_INVALID", err.Error(), "")
+			}
+			var localPaths remote.Paths
+			if registry.IsLocalWorker(opts.worker) {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return output.NewError("LOCAL_HOME_FAILED", err.Error(), "")
+				}
+				localPaths, err = remote.BuildPaths(filepath.ToSlash(home), opts.remoteRoot, loaded.Config.Name, run)
+				if err != nil {
+					return output.NewError("LOCAL_PATH_INVALID", err.Error(), "")
+				}
 			}
 			specs, err := watchSpecs(loaded.Config, args)
 			if err != nil {
@@ -1332,12 +1511,18 @@ func watchCommand(opts *options) *cobra.Command {
 					}
 					snapshot = next
 				}
-				res, err := syncer.Run(cmd.Context(), loaded, syncer.Options{
+				syncOpts := syncer.Options{
 					Worker:     opts.worker,
 					RunID:      run,
 					RemoteRoot: opts.remoteRoot,
 					Delete:     true,
-				}, Version)
+				}
+				var res syncer.Result
+				if registry.IsLocalWorker(opts.worker) {
+					res, err = syncer.RunLocal(cmd.Context(), loaded, syncOpts, Version)
+				} else {
+					res, err = syncer.Run(cmd.Context(), loaded, syncOpts, Version)
+				}
 				if err != nil {
 					return output.NewError("WATCH_SYNC_FAILED", err.Error(), "Run workyard sync with --verbose")
 				}
@@ -1361,13 +1546,19 @@ func watchCommand(opts *options) *cobra.Command {
 					if action != "sync-restart" {
 						continue
 					}
-					oldOut := cmd.OutOrStdout()
-					cmd.SetOut(io.Discard)
-					if err := remoteControl(cmd, opts, loaded, "restart", run, []string{spec.Service}, controlExtra{}); err != nil {
+					if registry.IsLocalWorker(opts.worker) {
+						if _, err := localDaemonCall(cmd.Context(), opts, localPaths, "restart", []string{spec.Service}, controlExtra{}); err != nil {
+							return err
+						}
+					} else {
+						oldOut := cmd.OutOrStdout()
+						cmd.SetOut(io.Discard)
+						if err := remoteControl(cmd, opts, loaded, "restart", run, []string{spec.Service}, controlExtra{}); err != nil {
+							cmd.SetOut(oldOut)
+							return err
+						}
 						cmd.SetOut(oldOut)
-						return err
 					}
-					cmd.SetOut(oldOut)
 					restarted = append(restarted, spec.Service)
 				}
 				if opts.json {
@@ -1534,8 +1725,8 @@ func deployCommand(opts *options) *cobra.Command {
 }
 
 func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string) error {
-	if opts.worker == "" {
-		return output.NewError("WORKER_REQUIRED", "--worker is required for deploy", "")
+	if err := requireWorker(opts, "deploy"); err != nil {
+		return err
 	}
 	project, services, err := deployProjectAndServices(opts.project, args)
 	if err != nil {
@@ -1575,6 +1766,9 @@ func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string
 	}
 	if !opts.quiet && !opts.json {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "deploying %s to %s run=%s\n", loaded.Config.Name, opts.worker, run)
+	}
+	if registry.IsLocalWorker(opts.worker) {
+		return runLocalDeploy(cmd, opts, d, loaded, services, waitServices, run, &steps, step)
 	}
 	home, err := remote.Home(cmd.Context(), opts.worker)
 	if err != nil {
@@ -1704,6 +1898,128 @@ func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string
 	return nil
 }
 
+func runLocalDeploy(cmd *cobra.Command, opts *options, d deployOptions, loaded config.Loaded, services, waitServices []string, run string, steps *[]deployStep, step func(string, string)) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return output.NewError("LOCAL_HOME_FAILED", err.Error(), "")
+	}
+	paths, err := remote.BuildPaths(filepath.ToSlash(home), opts.remoteRoot, loaded.Config.Name, run)
+	if err != nil {
+		return output.NewError("LOCAL_PATH_INVALID", err.Error(), "")
+	}
+	if d.install {
+		step("install", "using local workyard "+Version)
+	}
+	if !d.skipDoctor {
+		report := doctor.Run(cmd.Context(), doctor.Options{
+			Project:      loaded.Config.Root,
+			Worker:       registry.LocalWorkerName,
+			RemoteRoot:   opts.remoteRoot,
+			RemoteBinary: opts.remoteBinary,
+			Version:      Version,
+			CheckProject: true,
+			Timeout:      8 * time.Second,
+			StateDir:     opts.stateDir,
+			Socket:       opts.socket,
+		}, doctor.SystemRunner{})
+		if !report.OK {
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": false, "failedStep": "doctor", "doctor": report, "steps": *steps})
+			}
+			printDoctorReport(cmd.OutOrStdout(), report)
+			return printedError{err: errors.New("doctor found required check failures"), exitCode: 1}
+		}
+		step("doctor", "required checks passed")
+	}
+	if d.fresh {
+		removed, err := deployLocalFresh(cmd, opts, paths, run)
+		if err != nil {
+			return err
+		}
+		if removed {
+			step("fresh", "removed existing run")
+		} else {
+			step("fresh", "no existing run")
+		}
+	}
+	syncRes, err := syncer.RunLocal(cmd.Context(), loaded, syncer.Options{
+		Worker:     registry.LocalWorkerName,
+		RunID:      run,
+		RemoteRoot: opts.remoteRoot,
+		Delete:     true,
+		Verbose:    opts.verbose,
+	}, Version)
+	if err != nil {
+		return output.NewError("LOCAL_SYNC_FAILED", err.Error(), "Check rsync and the local Workyard run directory")
+	}
+	rememberRun(cmd.ErrOrStderr(), opts, loaded, registry.RunRef{
+		Worker:           syncRes.Worker,
+		Project:          syncRes.Project,
+		RunID:            syncRes.RunID,
+		RemoteRoot:       opts.remoteRoot,
+		RemoteRunPath:    syncRes.RemoteRunPath,
+		RemoteSourcePath: syncRes.RemoteSourcePath,
+		LocalRoot:        loaded.Config.Root,
+		ConfigPath:       loaded.Config.Path,
+	})
+	step("sync", syncRes.RemoteSourcePath)
+	if !d.skipSetup {
+		res, err := localDaemonCall(cmd.Context(), opts, paths, "setup", nil, controlExtra{})
+		if err != nil {
+			return output.NewError("SETUP_FAILED", err.Error(), "Run workyard events --worker localhost --json or logs setup")
+		}
+		step("setup", res.Message)
+	}
+	if !d.skipBuild {
+		res, err := localDaemonCall(cmd.Context(), opts, paths, "build", nil, controlExtra{})
+		if err != nil {
+			return output.NewError("BUILD_FAILED", err.Error(), "Run workyard events --worker localhost --json or logs build")
+		}
+		step("build", res.Message)
+	}
+	stopExtra := controlExtra{}
+	if len(services) == 0 {
+		stopExtra.All = true
+	}
+	if res, err := localDaemonCall(cmd.Context(), opts, paths, "stop", services, stopExtra); err == nil {
+		step("stop", serviceStatusSummary(res.Services))
+	} else if opts.verbose && !opts.json {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before start skipped: %s\n", err)
+	}
+	startRes, err := localDaemonCall(cmd.Context(), opts, paths, "start", services, controlExtra{Timeout: d.timeout})
+	if err != nil {
+		return output.NewError("START_FAILED", err.Error(), "Run workyard inspect --worker localhost --json or logs <service>")
+	}
+	step("start", serviceStatusSummary(startRes.Services))
+	if !d.skipWait && len(waitServices) > 0 {
+		res, err := localDaemonCall(cmd.Context(), opts, paths, "wait", waitServices, controlExtra{Healthy: true, Timeout: d.timeout})
+		if err != nil {
+			return output.NewError("WAIT_FAILED", err.Error(), "Run workyard inspect --worker localhost --json")
+		}
+		step("wait", res.Message)
+	}
+	urlsRes, err := localDaemonCall(cmd.Context(), opts, paths, "urls", services, controlExtra{})
+	if err != nil {
+		return output.NewError("URLS_FAILED", err.Error(), "Run workyard status --worker localhost --json")
+	}
+	step("urls", fmt.Sprintf("%d url(s)", len(urlsRes.URLs)))
+	if opts.json {
+		return output.WriteJSON(cmd.OutOrStdout(), map[string]any{
+			"ok":               true,
+			"worker":           registry.LocalWorkerName,
+			"project":          paths.Project,
+			"runId":            paths.RunID,
+			"remoteRunPath":    paths.RunRoot,
+			"remoteSourcePath": paths.Source,
+			"services":         urlsRes.Services,
+			"urls":             urlsRes.URLs,
+			"steps":            *steps,
+		})
+	}
+	printDeployURLs(cmd.OutOrStdout(), urlsRes.URLs)
+	return nil
+}
+
 func deployInstall(cmd *cobra.Command, opts *options, d deployOptions, paths remote.Paths) (remote.InstallResult, error) {
 	platform, err := remote.DetectPlatform(cmd.Context(), opts.worker)
 	if err != nil {
@@ -1750,6 +2066,30 @@ func deployFresh(cmd *cobra.Command, opts *options, paths remote.Paths, run stri
 	}
 	store := registry.New(registry.DefaultPath(opts.stateDir))
 	_, _ = store.Remove(opts.worker, paths.Project, run)
+	return true, nil
+}
+
+func deployLocalFresh(cmd *cobra.Command, opts *options, paths remote.Paths, run string) (bool, error) {
+	exists, err := localRunExists(paths)
+	if err != nil {
+		return false, output.NewError("LOCAL_RUN_CHECK_FAILED", err.Error(), "")
+	}
+	if !exists {
+		return false, nil
+	}
+	if !opts.quiet && !opts.json {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "fresh: removing existing run %s\n", paths.RunRoot)
+	}
+	if _, err := localDaemonCall(cmd.Context(), opts, paths, "stop", nil, controlExtra{All: true}); err != nil {
+		if !opts.quiet {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before fresh cleanup failed: %s\n", err)
+		}
+	}
+	if _, err := cleanupLocalRun(paths); err != nil {
+		return false, output.NewError("LOCAL_RUN_CLEANUP_FAILED", err.Error(), "")
+	}
+	store := registry.New(registry.DefaultPath(opts.stateDir))
+	_, _ = store.Remove(registry.LocalWorkerName, paths.Project, run)
 	return true, nil
 }
 
@@ -1879,8 +2219,11 @@ func syncCommand(opts *options) *cobra.Command {
 	var deleteRemote bool
 	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Sync the project to a remote worker",
+		Short: "Sync the project to a worker",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireWorker(opts, "sync"); err != nil {
+				return err
+			}
 			loaded, err := config.Load(opts.project)
 			if err != nil {
 				return output.NewError("CONFIG_LOAD_FAILED", err.Error(), "")
@@ -1893,16 +2236,22 @@ func syncCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return output.NewError("RUN_ID_INVALID", err.Error(), "")
 			}
-			res, err := syncer.Run(cmd.Context(), loaded, syncer.Options{
+			syncOpts := syncer.Options{
 				Worker:     opts.worker,
 				RunID:      run,
 				RemoteRoot: opts.remoteRoot,
 				DryRun:     dryRun,
 				Delete:     deleteRemote,
 				Verbose:    opts.verbose,
-			}, Version)
+			}
+			var res syncer.Result
+			if registry.IsLocalWorker(opts.worker) {
+				res, err = syncer.RunLocal(cmd.Context(), loaded, syncOpts, Version)
+			} else {
+				res, err = syncer.Run(cmd.Context(), loaded, syncOpts, Version)
+			}
 			if err != nil {
-				return output.NewError("SYNC_FAILED", err.Error(), "Check SSH access and run workyard sync with --verbose")
+				return output.NewError("SYNC_FAILED", err.Error(), "Check rsync, worker connectivity, and run workyard sync with --verbose")
 			}
 			rememberRun(cmd.ErrOrStderr(), opts, loaded, registry.RunRef{
 				Worker:           res.Worker,
@@ -1918,7 +2267,11 @@ func syncCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), res)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "synced %s to %s:%s\n", res.Project, res.Worker, res.RemoteSourcePath)
+			if registry.IsLocalWorker(res.Worker) {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "synced %s to %s\n", res.Project, res.RemoteSourcePath)
+			} else {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "synced %s to %s:%s\n", res.Project, res.Worker, res.RemoteSourcePath)
+			}
 			return nil
 		},
 	}
@@ -2237,6 +2590,9 @@ func logsCommand(opts *options) *cobra.Command {
 }
 
 func followLogs(cmd *cobra.Command, opts *options, target string, extra controlExtra) error {
+	if err := requireWorker(opts, "logs --follow"); err != nil {
+		return err
+	}
 	loaded, err := config.Load(opts.project)
 	if err != nil {
 		return output.NewError("CONFIG_LOAD_FAILED", err.Error(), "")
@@ -2253,10 +2609,10 @@ func followLogs(cmd *cobra.Command, opts *options, target string, extra controlE
 	if err != nil {
 		return output.NewError("LOG_TARGET_INVALID", err.Error(), "")
 	}
-	if opts.worker != "" {
-		return followRemoteLogs(cmd, opts, loaded, run, relPaths, extra.Tail)
+	if registry.IsLocalWorker(opts.worker) {
+		return followLocalLogs(cmd, opts, loaded, run, relPaths, extra.Tail)
 	}
-	return followLocalLogs(cmd, opts, loaded, run, relPaths, extra.Tail)
+	return followRemoteLogs(cmd, opts, loaded, run, relPaths, extra.Tail)
 }
 
 func followRemoteLogs(cmd *cobra.Command, opts *options, loaded config.Loaded, run string, relPaths []string, tailLines int) error {
@@ -2463,6 +2819,9 @@ type controlExtra struct {
 }
 
 func runControl(cmd *cobra.Command, opts *options, action string, services []string, extra controlExtra) error {
+	if err := requireWorker(opts, action); err != nil {
+		return err
+	}
 	loaded, err := config.Load(opts.project)
 	if err != nil {
 		return output.NewError("CONFIG_LOAD_FAILED", err.Error(), "")
@@ -2475,10 +2834,17 @@ func runControl(cmd *cobra.Command, opts *options, action string, services []str
 	if err != nil {
 		return output.NewError("RUN_ID_INVALID", err.Error(), "")
 	}
-	if opts.worker != "" {
-		return remoteControl(cmd, opts, loaded, action, run, services, extra)
+	if registry.IsLocalWorker(opts.worker) {
+		return localControl(cmd, opts, loaded, action, run, services, extra)
 	}
-	return localControl(cmd, opts, loaded, action, run, services, extra)
+	return remoteControl(cmd, opts, loaded, action, run, services, extra)
+}
+
+func requireWorker(opts *options, command string) error {
+	if strings.TrimSpace(opts.worker) != "" {
+		return nil
+	}
+	return output.NewError("WORKER_REQUIRED", "--worker is required for "+command, "Pass --worker localhost for this machine or --worker <name> for a registered worker")
 }
 
 func watchSpecs(cfg config.Config, services []string) ([]watcher.Spec, error) {
@@ -2521,17 +2887,34 @@ func watchDebounce(specs []watcher.Spec) time.Duration {
 
 func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, action, run string, services []string, extra controlExtra) error {
 	home, _ := os.UserHomeDir()
-	paths, err := remote.BuildPaths(home, opts.remoteRoot, loaded.Config.Name, run)
+	paths, err := remote.BuildPaths(filepath.ToSlash(home), opts.remoteRoot, loaded.Config.Name, run)
 	if err != nil {
 		return err
 	}
 	if actionNeedsLocalSource(action) {
-		if err := prepareLocalSource(cmd.Context(), loaded, paths); err != nil {
+		res, err := syncer.RunLocal(cmd.Context(), loaded, syncer.Options{
+			Worker:     registry.LocalWorkerName,
+			RunID:      run,
+			RemoteRoot: opts.remoteRoot,
+			Delete:     true,
+			Verbose:    opts.verbose,
+		}, Version)
+		if err != nil {
 			return output.NewError("LOCAL_SYNC_FAILED", err.Error(), "Check rsync and the local Workyard run directory")
 		}
+		rememberRun(cmd.ErrOrStderr(), opts, loaded, registry.RunRef{
+			Worker:           res.Worker,
+			Project:          res.Project,
+			RunID:            res.RunID,
+			RemoteRoot:       opts.remoteRoot,
+			RemoteRunPath:    res.RemoteRunPath,
+			RemoteSourcePath: res.RemoteSourcePath,
+			LocalRoot:        loaded.Config.Root,
+			ConfigPath:       loaded.Config.Path,
+		})
 	}
 	rememberRun(cmd.ErrOrStderr(), opts, loaded, registry.RunRef{
-		Worker:           "localhost",
+		Worker:           registry.LocalWorkerName,
 		Project:          paths.Project,
 		RunID:            paths.RunID,
 		RemoteRoot:       opts.remoteRoot,
@@ -2540,21 +2923,26 @@ func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, actio
 		LocalRoot:        loaded.Config.Root,
 		ConfigPath:       loaded.Config.Path,
 	})
-	socket := opts.socket
-	if socket == "" {
-		socket = defaultSocket(opts.stateDir)
+	res, err := localDaemonCall(cmd.Context(), opts, paths, action, services, extra)
+	if err != nil {
+		return output.NewError("DAEMONCTL_FAILED", err.Error(), "Run workyard daemon start")
 	}
+	return printDaemonResponse(cmd.OutOrStdout(), res, opts.json || action == "open", action)
+}
+
+func localDaemonCall(ctx context.Context, opts *options, paths remote.Paths, action string, services []string, extra controlExtra) (worker.Response, error) {
+	socket := daemonSocket(opts)
 	if action != "stop" {
-		if err := ensureLocalDaemonRunning(cmd.Context(), opts); err != nil {
-			return err
+		if err := ensureLocalDaemonRunning(ctx, opts); err != nil {
+			return worker.Response{}, err
 		}
 	}
-	res, err := worker.Call(socket, worker.Request{
+	return worker.Call(socket, worker.Request{
 		Action:   action,
 		RunRoot:  paths.RunRoot,
 		Project:  paths.Project,
 		RunID:    paths.RunID,
-		Worker:   "localhost",
+		Worker:   registry.LocalWorkerName,
 		Services: services,
 		All:      extra.All,
 		Tail:     extra.Tail,
@@ -2564,10 +2952,6 @@ func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, actio
 		Status:   extra.Status,
 		Timeout:  extra.Timeout,
 	})
-	if err != nil {
-		return output.NewError("DAEMONCTL_FAILED", err.Error(), "Run workyard daemon start")
-	}
-	return printDaemonResponse(cmd.OutOrStdout(), res, opts.json || action == "open", action)
 }
 
 func actionNeedsLocalSource(action string) bool {
@@ -2585,37 +2969,6 @@ func ensureLocalDaemonRunning(ctx context.Context, opts *options) error {
 	}
 	_, err := launchLocalDaemon(ctx, opts, false)
 	return err
-}
-
-func prepareLocalSource(ctx context.Context, loaded config.Loaded, paths remote.Paths) error {
-	source := filepath.FromSlash(paths.Source)
-	logs := filepath.FromSlash(paths.Logs)
-	if err := guardLocalManagedPaths(paths); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(source, 0o700); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(logs, 0o700); err != nil {
-		return err
-	}
-	if err := guardLocalManagedPaths(paths); err != nil {
-		return err
-	}
-	excludeFile, err := writeLocalExcludeFile(loaded.Config)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(excludeFile)
-
-	var stderr bytes.Buffer
-	args := []string{"-az", "--delete", "--delete-excluded", "--exclude-from", excludeFile, "--", loaded.Config.Root + string(filepath.Separator), source + string(filepath.Separator)}
-	rsync := exec.CommandContext(ctx, "rsync", args...)
-	rsync.Stderr = &stderr
-	if err := rsync.Run(); err != nil {
-		return fmt.Errorf("rsync local source failed: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
 }
 
 func guardLocalManagedPaths(paths remote.Paths) error {
@@ -2639,37 +2992,6 @@ func guardLocalManagedPaths(paths remote.Paths) error {
 		}
 	}
 	return nil
-}
-
-func writeLocalExcludeFile(cfg config.Config) (string, error) {
-	f, err := os.CreateTemp("", "workyard-local-excludes-*.txt")
-	if err != nil {
-		return "", err
-	}
-	seen := map[string]bool{}
-	for _, item := range append(syncer.BuiltinExcludes, cfg.Sync.Exclude...) {
-		item = strings.TrimSpace(item)
-		if item == "" || seen[item] {
-			continue
-		}
-		if cfg.Sync.IncludeEnvFiles && isEnvExclude(item) {
-			continue
-		}
-		seen[item] = true
-		if _, err := fmt.Fprintln(f, item); err != nil {
-			_ = f.Close()
-			return "", err
-		}
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	return f.Name(), nil
-}
-
-func isEnvExclude(item string) bool {
-	item = strings.TrimSpace(item)
-	return item == ".env" || strings.HasPrefix(item, ".env.")
 }
 
 func remoteControl(cmd *cobra.Command, opts *options, loaded config.Loaded, action, run string, services []string, extra controlExtra) error {

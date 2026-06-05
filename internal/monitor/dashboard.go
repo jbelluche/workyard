@@ -500,7 +500,6 @@ function render(next) {
         '<b>' + esc(w.runningCount || 0) + '</b>/' + esc(w.serviceCount || 0) + ' services · ' +
         '<b>' + esc(w.healthyCount || 0) + '</b> healthy' +
       '</div>' +
-      '<div class="when">' + esc(relTime(w.lastHeartbeat)) + '</div>' +
       (w.lastError ? '<div class="err">' + esc(w.lastError) + '</div>' : '') +
     '</div>';
   }).join("") : '<div class="empty">No workers reporting</div>';

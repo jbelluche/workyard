@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackbelluche/workyard/internal/config"
+	"github.com/jackbelluche/workyard/internal/registry"
 	"github.com/jackbelluche/workyard/internal/remote"
 )
 
@@ -149,9 +151,125 @@ func Run(ctx context.Context, loaded config.Loaded, opts Options, version string
 	}, nil
 }
 
+func RunLocal(ctx context.Context, loaded config.Loaded, opts Options, version string) (Result, error) {
+	if opts.RunID == "" {
+		return Result{}, fmt.Errorf("--run is required")
+	}
+	started := time.Now().UTC()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Result{}, err
+	}
+	paths, err := remote.BuildPaths(filepath.ToSlash(home), opts.RemoteRoot, loaded.Config.Name, opts.RunID)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := remote.GuardDestination(paths.Source); err != nil {
+		return Result{}, err
+	}
+	if err := prepareLocalLayout(paths); err != nil {
+		return Result{}, err
+	}
+	excludeFile, err := writeExcludeFile(loaded.Config)
+	if err != nil {
+		return Result{}, err
+	}
+	defer os.Remove(excludeFile)
+
+	source := filepath.FromSlash(paths.Source)
+	args := []string{"-az", "--stats", "--exclude-from", excludeFile}
+	if opts.Delete {
+		args = append(args, "--delete", "--delete-excluded")
+	}
+	if opts.DryRun {
+		args = append(args, "--dry-run")
+	}
+	args = append(args, "--", loaded.Config.Root+string(filepath.Separator), source+string(filepath.Separator))
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return Result{}, fmt.Errorf("rsync local source failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if !opts.DryRun {
+		meta := Metadata{
+			Project:         paths.Project,
+			RunID:           paths.RunID,
+			SourcePath:      paths.Source,
+			SyncedAt:        time.Now().UTC(),
+			LocalRoot:       loaded.Config.Root,
+			GitBranch:       gitOutput(loaded.Config.Root, "rev-parse", "--abbrev-ref", "HEAD"),
+			GitCommit:       gitOutput(loaded.Config.Root, "rev-parse", "HEAD"),
+			Dirty:           gitDirty(loaded.Config.Root),
+			WorkyardVersion: version,
+		}
+		data, _ := json.MarshalIndent(meta, "", "  ")
+		data = append(data, '\n')
+		if err := os.WriteFile(filepath.FromSlash(paths.Sync), data, 0o600); err != nil {
+			return Result{}, err
+		}
+	}
+	return Result{
+		OK:               true,
+		Worker:           registry.LocalWorkerName,
+		Project:          paths.Project,
+		RunID:            paths.RunID,
+		RemoteRunPath:    paths.RunRoot,
+		RemoteSourcePath: paths.Source,
+		DryRun:           opts.DryRun,
+		StartedAt:        started,
+		FinishedAt:       time.Now().UTC(),
+		Stats:            parseStats(stdout.String()),
+	}, nil
+}
+
 func prepareRemoteLayout(ctx context.Context, worker string, paths remote.Paths, binDir string) error {
 	_, err := remote.Run(ctx, worker, []string{"sh", "-lc", remotePrepareScript(paths, binDir)}, nil, 20*time.Second)
 	return err
+}
+
+func prepareLocalLayout(paths remote.Paths) error {
+	if err := guardLocalManagedPaths(paths); err != nil {
+		return err
+	}
+	create := []string{
+		filepath.FromSlash(paths.Source),
+		filepath.FromSlash(paths.Logs),
+		filepath.FromSlash(paths.DaemonDir),
+		filepath.FromSlash(path.Join(paths.Home, ".workyard", "bin")),
+	}
+	for _, dir := range create {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return guardLocalManagedPaths(paths)
+}
+
+func guardLocalManagedPaths(paths remote.Paths) error {
+	for _, value := range []string{
+		filepath.FromSlash(path.Join(paths.Home, ".workyard")),
+		filepath.FromSlash(path.Join(paths.Home, ".workyard", "runs")),
+		filepath.FromSlash(path.Dir(paths.RunRoot)),
+		filepath.FromSlash(paths.RunRoot),
+		filepath.FromSlash(paths.Source),
+		filepath.FromSlash(paths.Logs),
+		filepath.FromSlash(paths.DaemonDir),
+		filepath.FromSlash(path.Join(paths.Home, ".workyard", "bin")),
+	} {
+		info, err := os.Lstat(value)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink path: %s", value)
+		}
+	}
+	return nil
 }
 
 func remotePrepareScript(paths remote.Paths, binDir string) string {

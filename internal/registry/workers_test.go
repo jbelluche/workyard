@@ -94,6 +94,16 @@ func TestWorkerStoreRejectsInvalidWorker(t *testing.T) {
 	}
 }
 
+func TestWorkerStoreRejectsLocalhostOverride(t *testing.T) {
+	store := NewWorkerStore(filepath.Join(t.TempDir(), "workers.yaml"))
+	if err := store.Upsert(WorkerConfig{Name: LocalWorkerName, Host: LocalWorkerName, User: "jack"}); err == nil {
+		t.Fatal("expected localhost worker override to be rejected")
+	}
+	if !IsLocalWorker("LOCALHOST") {
+		t.Fatal("expected local worker helper to be case-insensitive")
+	}
+}
+
 func TestWorkerStoreMigratesLegacyJSONWhenYAMLMissing(t *testing.T) {
 	dir := t.TempDir()
 	legacyPath := filepath.Join(dir, "workers.json")

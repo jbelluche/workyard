@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,24 @@ func TestWorkerSSHRejectsInvalidTarget(t *testing.T) {
 		t.Fatalf("expected invalid worker to fail required checks")
 	}
 	assertCheck(t, report, "worker.ssh", StatusFail)
+}
+
+func TestRunChecksLocalWorkerWithoutSSH(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	t.Setenv("HOME", home)
+	report := Run(context.Background(), Options{Version: "test", Worker: "localhost"}, passingRunner())
+	if !report.OK {
+		t.Fatalf("expected local worker report to pass required checks: %#v", report.Checks)
+	}
+	assertCheck(t, report, "worker.local", StatusPass)
+	assertCheck(t, report, "worker.runRoot", StatusPass)
+	assertCheck(t, report, "worker.ports", StatusPass)
+	assertCheck(t, report, "worker.daemon", StatusWarn)
+	for _, check := range report.Checks {
+		if check.Name == "worker.ssh" {
+			t.Fatalf("local worker should not run SSH checks: %#v", report.Checks)
+		}
+	}
 }
 
 func passingRunner() fakeRunner {
