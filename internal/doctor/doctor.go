@@ -129,7 +129,7 @@ func Run(ctx context.Context, opts Options, runner Runner) Report {
 					report.add(workerBinary(ctx, runner, worker, home, opts.RemoteBinary, version, opts.Timeout))
 					report.add(workerDaemonPing(ctx, runner, worker, home, opts.RemoteBinary, opts.Timeout))
 					report.add(workerRunRootPermissions(ctx, runner, worker, home, opts.RemoteRoot, opts.Timeout))
-					report.add(workerPortRangeAvailable(ctx, runner, worker, configuredPortRange(opts.Project), opts.Timeout))
+					report.add(workerPortRangeAvailable(ctx, runner, worker, home, opts.RemoteBinary, configuredPortRange(opts.Project), opts.Timeout))
 				}
 			}
 		}
@@ -413,13 +413,18 @@ func workerSSH(ctx context.Context, runner Runner, worker string, timeout time.D
 	}
 	res, err := sshRun(ctx, runner, worker, "printf '%s' \"$HOME\"", timeout)
 	if err != nil {
+		hint := "Check Tailscale connectivity and SSH access to " + worker
+		combined := strings.ToLower(res.Stdout + " " + res.Stderr + " " + err.Error())
+		if strings.Contains(combined, "permission denied") || strings.Contains(combined, "publickey") {
+			hint = "Set up key-based SSH auth: ssh-copy-id " + worker
+		}
 		return Check{
 			Name:     "worker.ssh",
 			Status:   StatusFail,
 			Required: true,
 			Message:  "worker SSH connection failed",
 			Detail:   trimOutput(res.Stdout, res.Stderr),
-			Hint:     "Check Tailscale connectivity and SSH access to " + worker,
+			Hint:     hint,
 		}
 	}
 	home := strings.TrimSpace(res.Stdout)
@@ -451,12 +456,20 @@ func workerBinary(ctx context.Context, runner Runner, worker, home, remoteBinary
 	binary := workerBinaryPath(home, remoteBinary)
 	res, err := sshRun(ctx, runner, worker, remote.ShellQuote(binary)+" version --json", timeout)
 	if err != nil {
+		detail := trimOutput(res.Stdout, res.Stderr)
+		message := "worker binary failed to run"
+		lower := strings.ToLower(detail + " " + err.Error())
+		if strings.Contains(lower, "no such file") || strings.Contains(lower, "not found") {
+			message = "worker binary is not installed at " + binary
+		} else if strings.Contains(lower, "permission denied") {
+			message = "worker binary is not executable"
+		}
 		return Check{
 			Name:     "worker.binary",
 			Status:   StatusFail,
 			Required: true,
-			Message:  "worker binary is missing, not executable, or failed to run",
-			Detail:   trimOutput(res.Stdout, res.Stderr),
+			Message:  message,
+			Detail:   detail,
 			Hint:     "Run workyard --worker " + worker + " install",
 		}
 	}
@@ -529,10 +542,17 @@ func workerRunRootPermissions(ctx context.Context, runner Runner, worker, home, 
 	return Check{Name: "worker.runRoot", Status: StatusPass, Required: true, Message: "worker run root is private and writable", Detail: runsRoot + " mode " + mode}
 }
 
-func workerPortRangeAvailable(ctx context.Context, runner Runner, worker, rawRange string, timeout time.Duration) Check {
+func workerPortRangeAvailable(ctx context.Context, runner Runner, worker, home, remoteBinary, rawRange string, timeout time.Duration) Check {
 	start, end, err := parsePortRange(rawRange)
 	if err != nil {
 		return Check{Name: "worker.ports", Status: StatusFail, Required: true, Message: "worker port range is invalid", Detail: err.Error(), Hint: "Set worker.portRange to a range like 3100-3999"}
+	}
+	// Prefer the installed worker binary; minimal images often lack python3.
+	binary := workerBinaryPath(home, remoteBinary)
+	probe := remote.ShellQuote(binary) + fmt.Sprintf(" portcheck %d %d", start, end)
+	res, binErr := sshRun(ctx, runner, worker, probe, timeout)
+	if binErr == nil {
+		return Check{Name: "worker.ports", Status: StatusPass, Required: true, Message: "worker port range has at least one available port", Detail: strings.TrimSpace(firstLine(res.Stdout))}
 	}
 	script := fmt.Sprintf(`python3 - %d %d <<'PY'
 import socket
@@ -551,11 +571,15 @@ for port in range(start, end + 1):
         sock.close()
 sys.exit(2)
 PY`, start, end)
-	res, err := sshRun(ctx, runner, worker, script, timeout)
-	if err != nil {
-		return Check{Name: "worker.ports", Status: StatusFail, Required: true, Message: "no available port was found in the worker range", Detail: trimOutput(res.Stdout, res.Stderr), Hint: "Free a port in " + rawRange + " or adjust worker.portRange"}
+	pyRes, pyErr := sshRun(ctx, runner, worker, script, timeout)
+	if pyErr == nil {
+		return Check{Name: "worker.ports", Status: StatusPass, Required: true, Message: "worker port range has at least one available port", Detail: strings.TrimSpace(pyRes.Stdout)}
 	}
-	return Check{Name: "worker.ports", Status: StatusPass, Required: true, Message: "worker port range has at least one available port", Detail: strings.TrimSpace(res.Stdout)}
+	combined := strings.ToLower(trimOutput(res.Stdout, res.Stderr) + " " + trimOutput(pyRes.Stdout, pyRes.Stderr))
+	if strings.Contains(combined, "not found") || strings.Contains(combined, "no such file") || strings.Contains(combined, "unknown command") {
+		return Check{Name: "worker.ports", Status: StatusWarn, Required: false, Message: "port availability could not be checked", Detail: "neither the workyard binary nor python3 could probe ports on the worker", Hint: "Run workyard --worker " + worker + " install"}
+	}
+	return Check{Name: "worker.ports", Status: StatusFail, Required: true, Message: "no available port was found in the worker range", Detail: trimOutput(pyRes.Stdout, pyRes.Stderr), Hint: "Free a port in " + rawRange + " or adjust worker.portRange"}
 }
 
 func sshRun(ctx context.Context, runner Runner, worker, command string, timeout time.Duration) (CommandResult, error) {

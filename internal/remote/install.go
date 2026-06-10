@@ -1,11 +1,14 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -68,6 +71,85 @@ func NormalizePlatform(osName, machine string) (Platform, error) {
 
 func (p Platform) ArtifactName() string {
 	return "workyard-" + p.OS + "-" + p.Arch
+}
+
+// EnsureArtifact returns a local binary matching the platform: the explicit
+// localBinary when given, the prebuilt artifact in artifactDir when present,
+// or a fresh cross-compiled build from the repo checkout when the Go
+// toolchain is available. version is stamped into builds so remote install
+// verification matches the running CLI.
+func EnsureArtifact(ctx context.Context, platform Platform, artifactDir, localBinary, version string) (string, error) {
+	if strings.TrimSpace(localBinary) != "" {
+		if _, err := os.Stat(localBinary); err != nil {
+			return "", err
+		}
+		return localBinary, nil
+	}
+	repoRoot, repoErr := FindRepoRoot()
+	dir := strings.TrimSpace(artifactDir)
+	if dir == "" {
+		dir = "dist"
+	}
+	if !filepath.IsAbs(dir) && repoErr == nil {
+		dir = filepath.Join(repoRoot, dir)
+	}
+	binary := filepath.Join(dir, platform.ArtifactName())
+	if info, err := os.Stat(binary); err == nil && !info.IsDir() {
+		return binary, nil
+	}
+	if repoErr != nil {
+		return "", fmt.Errorf("artifact %s not found and no Workyard checkout to build from: %v", binary, repoErr)
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		return "", fmt.Errorf("artifact %s not found and the Go toolchain is unavailable to build it", binary)
+	}
+	if err := os.MkdirAll(filepath.Dir(binary), 0o755); err != nil {
+		return "", err
+	}
+	args := []string{"build"}
+	if strings.TrimSpace(version) != "" {
+		args = append(args, "-ldflags", "-X github.com/jackbelluche/workyard/internal/cli.Version="+version)
+	}
+	args = append(args, "-o", binary, "./cmd/workyard")
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "GOOS="+platform.OS, "GOARCH="+platform.Arch, "CGO_ENABLED=0")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("go build for %s/%s failed: %w: %s", platform.OS, platform.Arch, err, strings.TrimSpace(stderr.String()))
+	}
+	return binary, nil
+}
+
+// FindRepoRoot walks up from the working directory to the Workyard checkout.
+func FindRepoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if isWorkyardRepoRoot(dir) {
+			return dir, nil
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			break
+		}
+		dir = next
+	}
+	return "", fmt.Errorf("could not find Workyard repository root from current directory")
+}
+
+func isWorkyardRepoRoot(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "cmd", "workyard", "main.go")); err != nil {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "module github.com/jackbelluche/workyard")
 }
 
 func InstallBinary(ctx context.Context, worker string, platform Platform, opts InstallOptions) (InstallResult, error) {

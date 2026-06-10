@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	osuser "os/user"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -191,7 +193,39 @@ func newRoot(opts *options) *cobra.Command {
 
 	root.AddCommand(groupCommand(versionCommand(opts), commandGroupUtility))
 	root.AddCommand(daemonctlCommand(opts))
+	root.AddCommand(portcheckCommand(opts))
 	return root
+}
+
+// portcheckCommand is a hidden helper doctor runs on workers (over SSH) to
+// test port availability without depending on python3 being installed.
+func portcheckCommand(opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:    "portcheck <start> <end>",
+		Short:  "Print the first free loopback port in a range",
+		Hidden: true,
+		Args:   cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			start, err1 := strconv.Atoi(args[0])
+			end, err2 := strconv.Atoi(args[1])
+			if err1 != nil || err2 != nil || start <= 0 || end > 65535 || end < start {
+				return output.NewError("PORT_RANGE_INVALID", "portcheck requires numeric <start> <end> within 1-65535", "")
+			}
+			for port := start; port <= end; port++ {
+				ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+				if err != nil {
+					continue
+				}
+				_ = ln.Close()
+				if opts.json {
+					return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "port": port})
+				}
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), port)
+				return nil
+			}
+			return output.NewError("PORT_UNAVAILABLE", fmt.Sprintf("no free port in %d-%d", start, end), "")
+		},
+	}
 }
 
 func groupCommand(cmd *cobra.Command, groupID string) *cobra.Command {
@@ -217,12 +251,9 @@ func installCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return output.NewError("WORKER_PLATFORM_FAILED", err.Error(), "Check SSH access and worker OS/architecture")
 			}
-			binary := localBinary
-			if binary == "" {
-				if artifactDir == "" {
-					artifactDir = "dist"
-				}
-				binary = filepath.Join(artifactDir, platform.ArtifactName())
+			binary, err := remote.EnsureArtifact(cmd.Context(), platform, artifactDir, localBinary, Version)
+			if err != nil {
+				return output.NewError("WORKER_ARTIFACT_MISSING", err.Error(), "Build it with GOOS="+platform.OS+" GOARCH="+platform.Arch+" go build -o dist/"+platform.ArtifactName()+" ./cmd/workyard or pass --local-binary")
 			}
 			res, err := remote.InstallBinary(cmd.Context(), opts.worker, platform, remote.InstallOptions{
 				LocalBinary:     binary,
@@ -230,7 +261,7 @@ func installCommand(opts *options) *cobra.Command {
 				ExpectedVersion: Version,
 			})
 			if err != nil {
-				return output.NewError("WORKER_INSTALL_FAILED", err.Error(), "Build the matching artifact first, for example GOOS="+platform.OS+" GOARCH="+platform.Arch+" go build -o "+binary+" ./cmd/workyard")
+				return output.NewError("WORKER_INSTALL_FAILED", err.Error(), "Check SSH access to the worker and rerun with --verbose")
 			}
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), res)
@@ -2084,9 +2115,9 @@ func deployInstall(cmd *cobra.Command, opts *options, d deployOptions, paths rem
 	if err != nil {
 		return remote.InstallResult{}, output.NewError("WORKER_PLATFORM_FAILED", err.Error(), "Check SSH access and worker OS/architecture")
 	}
-	binary := d.localBinary
-	if binary == "" {
-		binary = filepath.Join(d.artifactDir, platform.ArtifactName())
+	binary, err := remote.EnsureArtifact(cmd.Context(), platform, d.artifactDir, d.localBinary, Version)
+	if err != nil {
+		return remote.InstallResult{}, output.NewError("WORKER_ARTIFACT_MISSING", err.Error(), "Build it with GOOS="+platform.OS+" GOARCH="+platform.Arch+" go build -o dist/"+platform.ArtifactName()+" ./cmd/workyard or pass --local-binary")
 	}
 	res, err := remote.InstallBinary(cmd.Context(), opts.worker, platform, remote.InstallOptions{
 		LocalBinary:     binary,
@@ -2094,7 +2125,7 @@ func deployInstall(cmd *cobra.Command, opts *options, d deployOptions, paths rem
 		ExpectedVersion: Version,
 	})
 	if err != nil {
-		return remote.InstallResult{}, output.NewError("WORKER_INSTALL_FAILED", err.Error(), "Build the matching artifact first, for example GOOS="+platform.OS+" GOARCH="+platform.Arch+" go build -o "+binary+" ./cmd/workyard")
+		return remote.InstallResult{}, output.NewError("WORKER_INSTALL_FAILED", err.Error(), "Check SSH access to the worker and rerun with --verbose")
 	}
 	paths.Binary = res.RemoteBinary
 	if err := remote.RestartDaemon(cmd.Context(), opts.worker, paths, ""); err != nil {

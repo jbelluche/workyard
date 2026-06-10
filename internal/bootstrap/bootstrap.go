@@ -1,13 +1,11 @@
 package bootstrap
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	osuser "os/user"
 	"path"
 	"path/filepath"
@@ -454,65 +452,7 @@ func ensureDockerGroup(ctx context.Context, report *Report, worker string, sudo 
 }
 
 func ensureLocalBinary(ctx context.Context, platform remote.Platform, opts Options) (string, error) {
-	if strings.TrimSpace(opts.LocalBinary) != "" {
-		if _, err := os.Stat(opts.LocalBinary); err != nil {
-			return "", err
-		}
-		return opts.LocalBinary, nil
-	}
-	repoRoot, err := findRepoRoot()
-	if err != nil {
-		return "", err
-	}
-	artifactDir := opts.ArtifactDir
-	if !filepath.IsAbs(artifactDir) {
-		artifactDir = filepath.Join(repoRoot, artifactDir)
-	}
-	binary := filepath.Join(artifactDir, platform.ArtifactName())
-	if info, err := os.Stat(binary); err == nil && !info.IsDir() {
-		return binary, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(binary), 0o755); err != nil {
-		return "", err
-	}
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/workyard")
-	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), "GOOS="+platform.OS, "GOARCH="+platform.Arch)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return binary, nil
-}
-
-func findRepoRoot() (string, error) {
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	for {
-		if isWorkyardRepoRoot(dir) {
-			return dir, nil
-		}
-		next := filepath.Dir(dir)
-		if next == dir {
-			break
-		}
-		dir = next
-	}
-	return "", fmt.Errorf("could not find Workyard repository root from current directory")
-}
-
-func isWorkyardRepoRoot(dir string) bool {
-	if _, err := os.Stat(filepath.Join(dir, "cmd", "workyard", "main.go")); err != nil {
-		return false
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(data), "module github.com/jackbelluche/workyard")
+	return remote.EnsureArtifact(ctx, platform, opts.ArtifactDir, opts.LocalBinary, opts.Version)
 }
 
 func registerWorker(stateDir string, resolved resolvedWorker) error {

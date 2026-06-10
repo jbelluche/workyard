@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jackbelluche/workyard/internal/registry"
+	"github.com/jackbelluche/workyard/internal/remote"
 )
 
 func TestResolveWorkerFromConfig(t *testing.T) {
@@ -167,7 +168,7 @@ func TestFindRepoRootWorksFromSubdirectory(t *testing.T) {
 	if err := os.Chdir(filepath.Join(original, "..", "..", "fixtures", "health-server")); err != nil {
 		t.Fatal(err)
 	}
-	root, err := findRepoRoot()
+	root, err := remote.FindRepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
