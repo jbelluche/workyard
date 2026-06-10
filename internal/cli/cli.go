@@ -13,6 +13,7 @@ import (
 	osuser "os/user"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -1429,7 +1430,7 @@ func uiCommand(opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ui",
 		Aliases: []string{"server"},
-		Short:   "Run the local Workyard monitor UI",
+		Short:   "Run the local Workyard monitor UI (with --json, prints listener info first, then serves)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if listen == "" {
 				listen = "127.0.0.1:3099"
@@ -1767,6 +1768,9 @@ func deployCommand(opts *options) *cobra.Command {
 
 func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string) error {
 	if err := requireWorker(opts, "deploy"); err != nil {
+		return err
+	}
+	if err := validateTimeoutFlag(d.timeout); err != nil {
 		return err
 	}
 	project, services, err := deployProjectAndServices(opts.project, args)
@@ -2329,7 +2333,9 @@ func daemonCommand(opts *options) *cobra.Command {
 		Use:   "daemon",
 		Short: "Manage the private worker daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_ = foreground
+			if !cmd.Flags().Changed("foreground") || !foreground {
+				return cmd.Help()
+			}
 			if opts.json {
 				_ = output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "message": "daemon starting"})
 			} else if !opts.quiet {
@@ -2338,7 +2344,7 @@ func daemonCommand(opts *options) *cobra.Command {
 			return worker.Serve(cmd.Context(), worker.DaemonOptions{StateDir: opts.stateDir, Socket: opts.socket, AllowRoot: allowRoot, Version: Version})
 		},
 	}
-	cmd.Flags().BoolVar(&foreground, "foreground", true, "run in the foreground")
+	cmd.Flags().BoolVar(&foreground, "foreground", true, "serve the daemon in the foreground (use workyard daemon start for the background)")
 	cmd.Flags().BoolVar(&allowRoot, "allow-root", false, "allow daemon to run as root")
 	cmd.AddCommand(daemonStartCommand(opts, &allowRoot))
 	cmd.AddCommand(daemonStopCommand(opts))
@@ -2846,6 +2852,9 @@ func waitCommand(opts *options) *cobra.Command {
 		Use:   "wait [service...]",
 		Short: "Wait for service state or health (all services when none are named)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateTimeoutFlag(timeout); err != nil {
+				return err
+			}
 			return runControl(cmd, opts, "wait", args, controlExtra{Healthy: healthy, Status: status, Timeout: timeout})
 		},
 	}
@@ -2879,9 +2888,33 @@ func openCommand(opts *options) *cobra.Command {
 			if len(res.URLs) == 0 {
 				return output.NewError("URL_NOT_FOUND", "no preview URL found", "")
 			}
-			return exec.Command("open", res.URLs[0].URL).Run()
+			return openURL(cmd.OutOrStdout(), cmd.ErrOrStderr(), res.URLs[0].URL)
 		},
 	}
+}
+
+// openURL launches the platform browser opener; when none exists (Linux
+// servers, SSH sessions) it prints the URL instead of failing.
+func openURL(out, errOut io.Writer, url string) error {
+	var argv []string
+	switch runtime.GOOS {
+	case "darwin":
+		argv = []string{"open", url}
+	case "linux":
+		argv = []string{"xdg-open", url}
+	case "windows":
+		argv = []string{"rundll32", "url.dll,FileProtocolHandler", url}
+	}
+	if len(argv) > 0 {
+		if _, err := exec.LookPath(argv[0]); err == nil {
+			if err := exec.Command(argv[0], argv[1:]...).Run(); err == nil {
+				return nil
+			}
+		}
+	}
+	_, _ = fmt.Fprintf(errOut, "no browser opener available; URL:\n")
+	_, _ = fmt.Fprintln(out, url)
+	return nil
 }
 
 func versionCommand(opts *options) *cobra.Command {
@@ -3239,6 +3272,16 @@ func remoteControl(cmd *cobra.Command, opts *options, loaded config.Loaded, acti
 			return printedError{err: err, exitCode: 1}
 		}
 		return output.NewError("REMOTE_COMMAND_FAILED", fmt.Sprintf("%s on %s: %s", action, opts.worker, truncateForDisplay(err.Error(), 2048)), "Check SSH connectivity to the worker or rerun with --verbose")
+	}
+	return nil
+}
+
+func validateTimeoutFlag(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	if _, err := time.ParseDuration(value); err != nil {
+		return output.NewError("TIMEOUT_INVALID", fmt.Sprintf("invalid --timeout %q", value), "Use a Go duration such as 30s, 2m, or 1h")
 	}
 	return nil
 }

@@ -37,6 +37,7 @@ func runLifecycleCommand(runRoot string, run lifecycleRun) error {
 		run.Timeout = 2 * time.Minute
 	}
 	if run.Timeout > 30*time.Minute {
+		appendEvent(runRoot, Event{Type: "lifecycle.timeout_capped", Service: run.Service, Message: fmt.Sprintf("%s timeout %s capped to the 30m maximum", run.Name, run.Timeout)})
 		run.Timeout = 30 * time.Minute
 	}
 	if run.Cwd == "" {
