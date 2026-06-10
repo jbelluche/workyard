@@ -20,6 +20,9 @@ import (
 
 const FileName = "workyard.yaml"
 
+// ErrNotFound marks a missing workyard.yaml (as opposed to an invalid one).
+var ErrNotFound = errors.New(FileName + " not found")
+
 var serviceNameRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -263,7 +266,7 @@ func Find(start string) (string, string, error) {
 		}
 		parent := filepath.Dir(root)
 		if parent == root {
-			return "", "", fmt.Errorf("%s not found from %s", FileName, start)
+			return "", "", fmt.Errorf("%w from %s", ErrNotFound, start)
 		}
 		root = parent
 	}

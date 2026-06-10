@@ -2959,9 +2959,23 @@ func runControl(cmd *cobra.Command, opts *options, action string, services []str
 	if err := requireWorker(opts, action); err != nil {
 		return err
 	}
+	run := opts.run
 	loaded, err := config.Load(opts.project)
 	if err != nil {
-		return output.NewError("CONFIG_LOAD_FAILED", err.Error(), "")
+		ref, fallbackErr := registryRunFallback(opts, action, err)
+		if fallbackErr != nil {
+			return fallbackErr
+		}
+		loaded, err = config.Load(ref.LocalRoot)
+		if err != nil {
+			return output.NewError("CONFIG_LOAD_FAILED", err.Error(), "The registered run's project at "+ref.LocalRoot+" no longer has a loadable workyard.yaml; see workyard runs list")
+		}
+		if run == "" {
+			run = ref.RunID
+		}
+		if !opts.quiet && !opts.json {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "using registered run %s/%s (%s)\n", ref.Project, ref.RunID, ref.LocalRoot)
+		}
 	}
 	if err := validateServiceArgs(loaded.Config, action, services); err != nil {
 		return err
@@ -2969,7 +2983,6 @@ func runControl(cmd *cobra.Command, opts *options, action string, services []str
 	if action == "wait" && len(services) == 0 {
 		services = config.ServiceNames(loaded.Config.Services)
 	}
-	run := opts.run
 	if run == "" {
 		run = runid.Default(loaded.Config.Root)
 	}
@@ -2981,6 +2994,50 @@ func runControl(cmd *cobra.Command, opts *options, action string, services []str
 		return localControl(cmd, opts, loaded, action, run, services, extra)
 	}
 	return remoteControl(cmd, opts, loaded, action, run, services, extra)
+}
+
+// registryRunFallback lets read-only commands work outside a project
+// directory: when no workyard.yaml is found and --project was not set, the
+// run registered for this worker is used instead. Multiple registered runs
+// are ambiguous and enumerated rather than guessed between.
+func registryRunFallback(opts *options, action string, loadErr error) (registry.RunRef, error) {
+	const notFoundHint = "Run from a project directory, pass --project, or see workyard runs list"
+	readOnly := map[string]bool{"status": true, "inspect": true, "urls": true, "logs": true, "events": true, "wait": true, "probe": true, "stop": true}
+	configMissing := errors.Is(loadErr, config.ErrNotFound)
+	if !readOnly[action] || !configMissing || opts.project != "." {
+		hint := ""
+		if configMissing {
+			hint = notFoundHint
+		}
+		return registry.RunRef{}, output.NewError("CONFIG_LOAD_FAILED", loadErr.Error(), hint)
+	}
+	store := registry.New(registry.DefaultPath(opts.stateDir))
+	runs, err := store.List()
+	if err != nil {
+		return registry.RunRef{}, output.NewError("CONFIG_LOAD_FAILED", loadErr.Error(), notFoundHint)
+	}
+	var candidates []registry.RunRef
+	for _, ref := range runs {
+		if ref.Worker != opts.worker || strings.TrimSpace(ref.LocalRoot) == "" {
+			continue
+		}
+		if opts.run != "" && ref.RunID != opts.run {
+			continue
+		}
+		candidates = append(candidates, ref)
+	}
+	switch len(candidates) {
+	case 1:
+		return candidates[0], nil
+	case 0:
+		return registry.RunRef{}, output.NewError("CONFIG_LOAD_FAILED", loadErr.Error(), notFoundHint)
+	default:
+		choices := make([]string, 0, len(candidates))
+		for _, ref := range candidates {
+			choices = append(choices, fmt.Sprintf("%s/%s (--project %s)", ref.Project, ref.RunID, ref.LocalRoot))
+		}
+		return registry.RunRef{}, output.NewError("RUN_AMBIGUOUS", "no workyard.yaml here and multiple runs are registered for "+opts.worker, "Choose one with --project or --run: "+strings.Join(choices, "; "))
+	}
 }
 
 // validateServiceArgs rejects unknown service names before any daemon or SSH
