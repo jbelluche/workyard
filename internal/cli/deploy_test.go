@@ -65,6 +65,34 @@ func TestDeployProjectAndServicesRejectsMissingPathLikeArg(t *testing.T) {
 	}
 }
 
+func TestDeployProjectAndServicesRejectsAmbiguousServiceDirectory(t *testing.T) {
+	dir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	if err := os.Mkdir("web", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := deployProjectAndServices(".", []string{"web"}); err == nil {
+		t.Fatal("expected ambiguous service/directory name to be rejected")
+	}
+}
+
+func TestDeployProjectAndServicesTreatsPlainWordAsService(t *testing.T) {
+	project, services, err := deployProjectAndServices(".", []string{"web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project != "." || !reflect.DeepEqual(services, []string{"web"}) {
+		t.Fatalf("project=%q services=%#v", project, services)
+	}
+}
+
 func TestRemoteTimeoutUsesRequestedStartTimeout(t *testing.T) {
 	got := remoteTimeout("start", "10m")
 	want := 10*time.Minute + 10*time.Second

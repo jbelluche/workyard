@@ -2197,6 +2197,11 @@ func remoteDaemonCall(ctx context.Context, opts *options, paths remote.Paths, ac
 	return res, nil
 }
 
+// deployProjectAndServices splits deploy's positional args into a project
+// path and service names. The first arg is a project path only when it is
+// written like one (./x, ../x, ~/x, absolute, contains a separator, or ends
+// in .yaml/.yml); a plain word is always a service name. The ambiguous case —
+// a plain word that also names a directory — is rejected instead of guessed.
 func deployProjectAndServices(defaultProject string, args []string) (string, []string, error) {
 	project := defaultProject
 	if project == "" {
@@ -2206,19 +2211,14 @@ func deployProjectAndServices(defaultProject string, args []string) (string, []s
 		return project, nil, nil
 	}
 	first := args[0]
-	if strings.HasSuffix(first, ".yaml") || strings.HasSuffix(first, ".yml") {
+	if looksLikeDeployProjectPath(first) || strings.HasSuffix(first, ".yaml") || strings.HasSuffix(first, ".yml") {
 		if _, err := os.Stat(first); err != nil {
 			return "", nil, fmt.Errorf("project path %q does not exist", first)
 		}
 		return first, args[1:], nil
 	}
-	if stat, err := os.Stat(first); err == nil {
-		if stat.IsDir() {
-			return first, args[1:], nil
-		}
-		return first, args[1:], nil
-	} else if looksLikeDeployProjectPath(first) {
-		return "", nil, fmt.Errorf("project path %q does not exist", first)
+	if stat, err := os.Stat(first); err == nil && stat.IsDir() {
+		return "", nil, fmt.Errorf("%q names both a directory and a possible service; use ./%s for the path or --project", first, first)
 	}
 	return project, args, nil
 }
