@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/jackbelluche/workyard/internal/output"
@@ -101,6 +102,47 @@ func TestWorkerListRowsIncludesBuiltinLocalhost(t *testing.T) {
 		}
 	}
 	t.Fatalf("localhost row missing from %#v", rows)
+}
+
+func TestWorkerRequiredHintListsRegisteredWorkers(t *testing.T) {
+	stateDir := t.TempDir()
+	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
+	for _, name := range []string{"pi", "r5"} {
+		if err := store.Upsert(registry.WorkerConfig{Name: name, Host: name, User: "jack"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := requireWorker(&options{stateDir: stateDir}, "status")
+	if err == nil {
+		t.Fatal("expected missing worker to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce == nil || ce.Code != "WORKER_REQUIRED" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"localhost", "pi", "r5"} {
+		if !strings.Contains(ce.Hint, want) {
+			t.Fatalf("hint %q missing %q", ce.Hint, want)
+		}
+	}
+}
+
+func TestWorkerCompletionsIncludeLocalhostAndRegisteredNames(t *testing.T) {
+	stateDir := t.TempDir()
+	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
+	if err := store.Upsert(registry.WorkerConfig{Name: "pi", Host: "pi", User: "jack"}); err != nil {
+		t.Fatal(err)
+	}
+	got := workerCompletions(stateDir)
+	want := []string{registry.LocalWorkerName, "pi"}
+	if len(got) != len(want) {
+		t.Fatalf("completions=%#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("completions=%#v, want %#v", got, want)
+		}
+	}
 }
 
 func TestLifecycleCommandRequiresExplicitWorker(t *testing.T) {

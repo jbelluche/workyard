@@ -140,6 +140,9 @@ func newRoot(opts *options) *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.remoteBinary, "remote-binary", "", "remote workyard binary path")
 	root.PersistentFlags().StringVar(&opts.socket, "socket", "", "daemon Unix socket path")
 	root.PersistentFlags().StringVar(&opts.stateDir, "state-dir", "", "worker state directory")
+	_ = root.RegisterFlagCompletionFunc("worker", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return workerCompletions(opts.stateDir), cobra.ShellCompDirectiveNoFileComp
+	})
 
 	root.AddGroup(
 		&cobra.Group{ID: commandGroupPrimary, Title: "Primary Workflows"},
@@ -2924,7 +2927,44 @@ func requireWorker(opts *options, command string) error {
 	if strings.TrimSpace(opts.worker) != "" {
 		return nil
 	}
-	return output.NewError("WORKER_REQUIRED", "--worker is required for "+command, "Pass --worker localhost for this machine or --worker <name> for a registered worker")
+	return output.NewError("WORKER_REQUIRED", "--worker is required for "+command, workerRequiredHint(opts.stateDir))
+}
+
+// workerRequiredHint names the actual workers the user can pass so the error
+// itself answers the question. Falls back to generic phrasing when the
+// registry is empty or unreadable.
+func workerRequiredHint(stateDir string) string {
+	names := registeredWorkerNames(stateDir)
+	if len(names) == 0 {
+		return "Pass --worker localhost for this machine or --worker <name> for a registered worker"
+	}
+	const maxListed = 6
+	if len(names) > maxListed {
+		names = append(names[:maxListed], "...")
+	}
+	return "Pass --worker localhost or one of: " + strings.Join(names, ", ")
+}
+
+// workerCompletions lists every value --worker accepts: the builtin
+// localhost plus all registered worker names.
+func workerCompletions(stateDir string) []string {
+	return append([]string{registry.LocalWorkerName}, registeredWorkerNames(stateDir)...)
+}
+
+func registeredWorkerNames(stateDir string) []string {
+	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
+	registered, err := store.List()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(registered))
+	for _, worker := range registered {
+		if strings.TrimSpace(worker.Name) != "" {
+			names = append(names, worker.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func watchSpecs(cfg config.Config, services []string) ([]watcher.Spec, error) {
