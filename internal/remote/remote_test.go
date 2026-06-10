@@ -119,3 +119,41 @@ func TestValidateManagedRunRejectsOutsidePaths(t *testing.T) {
 		t.Fatal("expected outside run path to be rejected")
 	}
 }
+
+func TestBuildLocalPathsUsesStateDir(t *testing.T) {
+	paths, err := BuildLocalPaths("/home/jack", "/tmp/custom-state", "", "fixture", "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.RunRoot != "/tmp/custom-state/runs/fixture/run-1" {
+		t.Fatalf("runRoot=%q", paths.RunRoot)
+	}
+	if paths.Socket != "/tmp/custom-state/daemon/workyard.sock" {
+		t.Fatalf("socket=%q", paths.Socket)
+	}
+	if paths.StateDir != "/tmp/custom-state" {
+		t.Fatalf("stateDir=%q", paths.StateDir)
+	}
+}
+
+func TestBuildLocalPathsDefaultsToHomeWorkyard(t *testing.T) {
+	paths, err := BuildLocalPaths("/home/jack", "", "", "fixture", "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.RunRoot != "/home/jack/.workyard/runs/fixture/run-1" {
+		t.Fatalf("runRoot=%q", paths.RunRoot)
+	}
+	if paths.StateDir != "/home/jack/.workyard" {
+		t.Fatalf("stateDir=%q", paths.StateDir)
+	}
+}
+
+func TestBuildLocalPathsRejectsRemoteRootOutsideStateDir(t *testing.T) {
+	if _, err := BuildLocalPaths("/home/jack", "/tmp/custom-state", "/home/jack/.workyard/runs", "fixture", "run-1"); err == nil {
+		t.Fatal("expected remote root outside the state dir runs root to be rejected")
+	}
+	if _, err := BuildLocalPaths("/home/jack", "/tmp/custom-state", "/tmp/custom-state/runs", "fixture", "run-1"); err != nil {
+		t.Fatalf("expected remote root under the state dir to be accepted: %v", err)
+	}
+}

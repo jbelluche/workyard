@@ -1193,24 +1193,37 @@ func cleanupPaths(cmd *cobra.Command, opts *options) (config.Loaded, remote.Path
 	if err != nil {
 		return config.Loaded{}, remote.Paths{}, output.NewError("RUN_ID_INVALID", err.Error(), "")
 	}
-	var home string
 	if registry.IsLocalWorker(opts.worker) {
-		home, err = os.UserHomeDir()
+		paths, err := buildLocalPaths(opts, loaded.Config.Name, run)
 		if err != nil {
-			return config.Loaded{}, remote.Paths{}, output.NewError("LOCAL_HOME_FAILED", err.Error(), "")
+			return config.Loaded{}, remote.Paths{}, err
 		}
-		home = filepath.ToSlash(home)
-	} else {
-		home, err = remote.Home(cmd.Context(), opts.worker)
-		if err != nil {
-			return config.Loaded{}, remote.Paths{}, output.NewError("SSH_FAILED", err.Error(), "Check Tailscale/SSH connectivity to the worker")
-		}
+		return loaded, paths, nil
+	}
+	home, err := remote.Home(cmd.Context(), opts.worker)
+	if err != nil {
+		return config.Loaded{}, remote.Paths{}, output.NewError("SSH_FAILED", err.Error(), "Check Tailscale/SSH connectivity to the worker")
 	}
 	paths, err := remote.BuildPaths(home, opts.remoteRoot, loaded.Config.Name, run)
 	if err != nil {
 		return config.Loaded{}, remote.Paths{}, output.NewError("REMOTE_PATH_INVALID", err.Error(), "")
 	}
 	return loaded, paths, nil
+}
+
+// buildLocalPaths derives localhost run paths from the active state dir so
+// sync, daemon validation, cleanup guards, and log paths all agree when
+// --state-dir is set.
+func buildLocalPaths(opts *options, projectName, run string) (remote.Paths, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return remote.Paths{}, output.NewError("LOCAL_HOME_FAILED", err.Error(), "")
+	}
+	paths, err := remote.BuildLocalPaths(filepath.ToSlash(home), filepath.ToSlash(daemonStateDir(opts)), opts.remoteRoot, projectName, run)
+	if err != nil {
+		return remote.Paths{}, output.NewError("LOCAL_PATH_INVALID", err.Error(), "")
+	}
+	return paths, nil
 }
 
 func localRunExists(paths remote.Paths) (bool, error) {
@@ -1288,7 +1301,7 @@ func localManagedRunRoot(paths remote.Paths) (string, error) {
 		return "", fmt.Errorf("local paths are incomplete")
 	}
 	root := filepath.Clean(filepath.FromSlash(paths.RunRoot))
-	runsRoot := filepath.Clean(filepath.FromSlash(path.Join(paths.Home, ".workyard", "runs")))
+	runsRoot := filepath.Clean(filepath.FromSlash(path.Join(localStateBase(paths), "runs")))
 	rel, err := filepath.Rel(runsRoot, root)
 	if err != nil {
 		return "", err
@@ -1304,6 +1317,13 @@ func localManagedRunRoot(paths remote.Paths) (string, error) {
 		return "", fmt.Errorf("logs path must be inside the run root")
 	}
 	return root, nil
+}
+
+func localStateBase(paths remote.Paths) string {
+	if strings.TrimSpace(paths.StateDir) != "" {
+		return paths.StateDir
+	}
+	return path.Join(paths.Home, ".workyard")
 }
 
 func doctorCommand(opts *options) *cobra.Command {
@@ -1492,13 +1512,9 @@ func watchCommand(opts *options) *cobra.Command {
 			}
 			var localPaths remote.Paths
 			if registry.IsLocalWorker(opts.worker) {
-				home, err := os.UserHomeDir()
+				localPaths, err = buildLocalPaths(opts, loaded.Config.Name, run)
 				if err != nil {
-					return output.NewError("LOCAL_HOME_FAILED", err.Error(), "")
-				}
-				localPaths, err = remote.BuildPaths(filepath.ToSlash(home), opts.remoteRoot, loaded.Config.Name, run)
-				if err != nil {
-					return output.NewError("LOCAL_PATH_INVALID", err.Error(), "")
+					return err
 				}
 			}
 			specs, err := watchSpecs(loaded.Config, args)
@@ -1557,6 +1573,7 @@ func watchCommand(opts *options) *cobra.Command {
 					Worker:     opts.worker,
 					RunID:      run,
 					RemoteRoot: opts.remoteRoot,
+					StateDir:   opts.stateDir,
 					Delete:     true,
 				}
 				var res syncer.Result
@@ -1944,13 +1961,9 @@ func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string
 }
 
 func runLocalDeploy(cmd *cobra.Command, opts *options, d deployOptions, loaded config.Loaded, services, waitServices []string, run string, steps *[]deployStep, step func(string, string)) error {
-	home, err := os.UserHomeDir()
+	paths, err := buildLocalPaths(opts, loaded.Config.Name, run)
 	if err != nil {
-		return output.NewError("LOCAL_HOME_FAILED", err.Error(), "")
-	}
-	paths, err := remote.BuildPaths(filepath.ToSlash(home), opts.remoteRoot, loaded.Config.Name, run)
-	if err != nil {
-		return output.NewError("LOCAL_PATH_INVALID", err.Error(), "")
+		return err
 	}
 	if d.install {
 		step("install", "using local workyard "+Version)
@@ -1991,6 +2004,7 @@ func runLocalDeploy(cmd *cobra.Command, opts *options, d deployOptions, loaded c
 		Worker:     registry.LocalWorkerName,
 		RunID:      run,
 		RemoteRoot: opts.remoteRoot,
+		StateDir:   opts.stateDir,
 		Delete:     true,
 		Verbose:    opts.verbose,
 	}, Version)
@@ -2286,6 +2300,7 @@ func syncCommand(opts *options) *cobra.Command {
 				Worker:     opts.worker,
 				RunID:      run,
 				RemoteRoot: opts.remoteRoot,
+				StateDir:   opts.stateDir,
 				DryRun:     dryRun,
 				Delete:     deleteRemote,
 				Verbose:    opts.verbose,
@@ -2736,10 +2751,9 @@ func followRemoteLogs(cmd *cobra.Command, opts *options, loaded config.Loaded, r
 }
 
 func followLocalLogs(cmd *cobra.Command, opts *options, loaded config.Loaded, run string, relPaths []string, tailLines int) error {
-	home, _ := os.UserHomeDir()
-	paths, err := remote.BuildPaths(home, opts.remoteRoot, loaded.Config.Name, run)
+	paths, err := buildLocalPaths(opts, loaded.Config.Name, run)
 	if err != nil {
-		return output.NewError("LOCAL_PATH_INVALID", err.Error(), "")
+		return err
 	}
 	files := make([]string, 0, len(relPaths))
 	for _, rel := range relPaths {
@@ -3080,8 +3094,7 @@ func watchDebounce(specs []watcher.Spec) time.Duration {
 }
 
 func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, action, run string, services []string, extra controlExtra) error {
-	home, _ := os.UserHomeDir()
-	paths, err := remote.BuildPaths(filepath.ToSlash(home), opts.remoteRoot, loaded.Config.Name, run)
+	paths, err := buildLocalPaths(opts, loaded.Config.Name, run)
 	if err != nil {
 		return err
 	}
@@ -3090,6 +3103,7 @@ func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, actio
 			Worker:     registry.LocalWorkerName,
 			RunID:      run,
 			RemoteRoot: opts.remoteRoot,
+			StateDir:   opts.stateDir,
 			Delete:     true,
 			Verbose:    opts.verbose,
 		}, Version)
@@ -3181,9 +3195,10 @@ func ensureLocalDaemonRunning(ctx context.Context, opts *options) error {
 }
 
 func guardLocalManagedPaths(paths remote.Paths) error {
+	base := localStateBase(paths)
 	for _, value := range []string{
-		filepath.FromSlash(path.Join(paths.Home, ".workyard")),
-		filepath.FromSlash(path.Join(paths.Home, ".workyard", "runs")),
+		filepath.FromSlash(base),
+		filepath.FromSlash(path.Join(base, "runs")),
 		filepath.FromSlash(path.Dir(paths.RunRoot)),
 		filepath.FromSlash(paths.RunRoot),
 		filepath.FromSlash(paths.Source),

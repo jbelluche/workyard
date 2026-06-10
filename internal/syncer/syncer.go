@@ -40,9 +40,12 @@ type Options struct {
 	Worker     string
 	RunID      string
 	RemoteRoot string
-	DryRun     bool
-	Delete     bool
-	Verbose    bool
+	// StateDir overrides the local state dir (~/.workyard) for localhost
+	// runs; ignored for remote workers.
+	StateDir string
+	DryRun   bool
+	Delete   bool
+	Verbose  bool
 }
 
 type Result struct {
@@ -160,7 +163,7 @@ func RunLocal(ctx context.Context, loaded config.Loaded, opts Options, version s
 	if err != nil {
 		return Result{}, err
 	}
-	paths, err := remote.BuildPaths(filepath.ToSlash(home), opts.RemoteRoot, loaded.Config.Name, opts.RunID)
+	paths, err := remote.BuildLocalPaths(filepath.ToSlash(home), filepath.ToSlash(opts.StateDir), opts.RemoteRoot, loaded.Config.Name, opts.RunID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -248,15 +251,19 @@ func prepareLocalLayout(paths remote.Paths) error {
 }
 
 func guardLocalManagedPaths(paths remote.Paths) error {
+	base := paths.StateDir
+	if strings.TrimSpace(base) == "" {
+		base = path.Join(paths.Home, ".workyard")
+	}
 	for _, value := range []string{
-		filepath.FromSlash(path.Join(paths.Home, ".workyard")),
-		filepath.FromSlash(path.Join(paths.Home, ".workyard", "runs")),
+		filepath.FromSlash(base),
+		filepath.FromSlash(path.Join(base, "runs")),
 		filepath.FromSlash(path.Dir(paths.RunRoot)),
 		filepath.FromSlash(paths.RunRoot),
 		filepath.FromSlash(paths.Source),
 		filepath.FromSlash(paths.Logs),
 		filepath.FromSlash(paths.DaemonDir),
-		filepath.FromSlash(path.Join(paths.Home, ".workyard", "bin")),
+		filepath.FromSlash(path.Join(base, "bin")),
 	} {
 		info, err := os.Lstat(value)
 		if os.IsNotExist(err) {

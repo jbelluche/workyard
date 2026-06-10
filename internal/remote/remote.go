@@ -19,6 +19,7 @@ var workerTargetRE = regexp.MustCompile(`^([A-Za-z0-9._%+-]+@)?[A-Za-z0-9._-]+$`
 
 type Paths struct {
 	Home      string `json:"home"`
+	StateDir  string `json:"stateDir,omitempty"`
 	RunRoot   string `json:"runRoot"`
 	Source    string `json:"source"`
 	Logs      string `json:"logs"`
@@ -81,6 +82,7 @@ func BuildPaths(home, remoteRoot, projectName, run string) (Paths, error) {
 	runRoot := path.Join(base, project, runSafe)
 	return Paths{
 		Home:      home,
+		StateDir:  path.Join(home, ".workyard"),
 		RunRoot:   runRoot,
 		Source:    path.Join(runRoot, "source"),
 		Logs:      path.Join(runRoot, "logs"),
@@ -89,6 +91,48 @@ func BuildPaths(home, remoteRoot, projectName, run string) (Paths, error) {
 		DaemonDir: path.Join(home, ".workyard", "daemon"),
 		Socket:    path.Join(home, ".workyard", "daemon", "workyard.sock"),
 		Binary:    path.Join(home, ".workyard", "bin", "workyard"),
+		Project:   project,
+		RunID:     runSafe,
+	}, nil
+}
+
+// BuildLocalPaths builds run paths for the builtin localhost worker. Unlike
+// remote workers, local runs live under the active state dir (default
+// ~/.workyard), so a custom --state-dir moves the run root, daemon socket,
+// and validation base together.
+func BuildLocalPaths(home, stateDir, remoteRoot, projectName, run string) (Paths, error) {
+	base := strings.TrimSpace(stateDir)
+	if base == "" {
+		base = path.Join(home, ".workyard")
+	}
+	project, err := runid.ProjectName(projectName)
+	if err != nil {
+		return Paths{}, err
+	}
+	runSafe, err := runid.Validate(run)
+	if err != nil {
+		return Paths{}, err
+	}
+	runsRoot := path.Join(base, "runs")
+	rootBase := runsRoot
+	if remoteRoot != "" {
+		rootBase = normalizeRoot(home, remoteRoot)
+		if !isUnder(rootBase, runsRoot) {
+			return Paths{}, fmt.Errorf("remote root must stay under %s", runsRoot)
+		}
+	}
+	runRoot := path.Join(rootBase, project, runSafe)
+	return Paths{
+		Home:      home,
+		StateDir:  base,
+		RunRoot:   runRoot,
+		Source:    path.Join(runRoot, "source"),
+		Logs:      path.Join(runRoot, "logs"),
+		State:     path.Join(runRoot, "state.json"),
+		Sync:      path.Join(runRoot, "sync.json"),
+		DaemonDir: path.Join(base, "daemon"),
+		Socket:    path.Join(base, "daemon", "workyard.sock"),
+		Binary:    path.Join(base, "bin", "workyard"),
 		Project:   project,
 		RunID:     runSafe,
 	}, nil
