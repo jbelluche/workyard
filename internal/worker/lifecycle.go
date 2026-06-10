@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackbelluche/workyard/internal/command"
 	"github.com/jackbelluche/workyard/internal/config"
+	"golang.org/x/sys/unix"
 )
 
 func (d *Daemon) start(req Request) Response {
@@ -216,12 +217,19 @@ func (d *Daemon) waitForExit(runRoot, name string, cmd *exec.Cmd, stdout, stderr
 	_ = stdout.Close()
 	_ = stderr.Close()
 	exitCode := 0
+	exitMessage := ""
 	if err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {
 			exitCode = exit.ExitCode()
+			if status, ok := exit.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				exitMessage = fmt.Sprintf("%s terminated by %s", name, unix.SignalName(status.Signal()))
+			}
 		} else {
 			exitCode = 1
 		}
+	}
+	if exitMessage == "" {
+		exitMessage = fmt.Sprintf("%s exited with code %d", name, exitCode)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -242,7 +250,7 @@ func (d *Daemon) waitForExit(runRoot, name string, cmd *exec.Cmd, stdout, stderr
 		_ = saveState(runRoot, st)
 	}
 	delete(d.processes, serviceKey(runRoot, name))
-	appendEvent(runRoot, Event{Type: "service.exit", Service: name, Message: fmt.Sprintf("%s exited with code %d", name, exitCode), ExitCode: &exitCode})
+	appendEvent(runRoot, Event{Type: "service.exit", Service: name, Message: exitMessage, ExitCode: &exitCode})
 }
 
 func (d *Daemon) stop(req Request) Response {

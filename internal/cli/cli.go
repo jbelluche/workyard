@@ -2646,7 +2646,7 @@ func controlCommandShort(action string) string {
 	case "status":
 		return "Show current service status for a run"
 	case "inspect":
-		return "Show detailed service state, hints, and recent events"
+		return "Show detailed service state, hints, and recent errors"
 	case "urls":
 		return "Show service preview URLs for a run"
 	case "probe":
@@ -3300,14 +3300,104 @@ func printDaemonResponse(w io.Writer, res worker.Response, jsonOut bool, action 
 		_, _ = fmt.Fprintln(w, res.Message)
 	case "setup", "build":
 		_, _ = fmt.Fprintln(w, res.Message)
+	case "inspect":
+		printInspectResponse(w, res)
 	default:
 		rows := make([][]string, 0, len(res.Services))
 		for _, svc := range res.Services {
-			rows = append(rows, []string{svc.Name, svc.Status, fmt.Sprint(svc.Healthy), fmt.Sprint(svc.PID), fmt.Sprint(svc.AssignedPort), svc.URL})
+			pid, port, url := "-", "-", "-"
+			if isRunningServiceStatus(svc.Status) {
+				pid = fmt.Sprint(svc.PID)
+				port = fmt.Sprint(svc.AssignedPort)
+				url = svc.URL
+			}
+			rows = append(rows, []string{svc.Name, svc.Status, fmt.Sprint(svc.Healthy), pid, port, url})
 		}
 		return output.WriteTable(w, []string{"SERVICE", "STATUS", "HEALTHY", "PID", "PORT", "URL"}, rows)
 	}
 	return nil
+}
+
+func isRunningServiceStatus(status string) bool {
+	switch status {
+	case "stopped", "exited":
+		return false
+	default:
+		return true
+	}
+}
+
+// printInspectResponse renders the detail the daemon already provides —
+// lifecycle timestamps, ports, log paths, recent stderr, and hints — instead
+// of the bare status table.
+func printInspectResponse(w io.Writer, res worker.Response) {
+	if len(res.Services) == 0 {
+		_, _ = fmt.Fprintln(w, "no services")
+		return
+	}
+	for i, svc := range res.Services {
+		if i > 0 {
+			_, _ = fmt.Fprintln(w)
+		}
+		health := "unhealthy"
+		if svc.Healthy {
+			health = "healthy"
+		}
+		_, _ = fmt.Fprintf(w, "%s  %s (%s)\n", svc.Name, svc.Status, health)
+		field := func(label, value string) {
+			if strings.TrimSpace(value) != "" {
+				_, _ = fmt.Fprintf(w, "  %-15s %s\n", label+":", value)
+			}
+		}
+		field("start command", svc.StartCommand)
+		field("cwd", svc.Cwd)
+		if svc.ConfiguredPort > 0 || svc.AssignedPort > 0 {
+			port := fmt.Sprintf("%d -> %d", svc.ConfiguredPort, svc.AssignedPort)
+			if svc.PortEnv != "" {
+				port += " (env " + svc.PortEnv + ")"
+			}
+			field("port", port)
+		}
+		if svc.PID > 0 {
+			field("pid", fmt.Sprint(svc.PID))
+		}
+		field("url", svc.URL)
+		field("health url", svc.HealthURL)
+		if !svc.StartedAt.IsZero() {
+			field("started", svc.StartedAt.Format(time.RFC3339))
+		}
+		if !svc.StoppedAt.IsZero() {
+			stopped := svc.StoppedAt.Format(time.RFC3339)
+			if svc.ExitCode != nil {
+				stopped += fmt.Sprintf(" (exit code %d)", *svc.ExitCode)
+			}
+			field("stopped", stopped)
+		}
+		var logPaths []string
+		for _, p := range []string{svc.Logs.Stdout, svc.Logs.Stderr} {
+			if p != "" {
+				logPaths = append(logPaths, p)
+			}
+		}
+		field("logs", strings.Join(logPaths, ", "))
+		field("logs command", svc.LogsCommand)
+		if len(svc.RecentErrors) > 0 {
+			_, _ = fmt.Fprintln(w, "  recent stderr:")
+			for _, line := range svc.RecentErrors {
+				_, _ = fmt.Fprintf(w, "    %s\n", line)
+			}
+		}
+	}
+	if len(res.Hints) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "hints:")
+		for _, hint := range res.Hints {
+			_, _ = fmt.Fprintf(w, "  [%s] %s: %s\n", hint.Severity, hint.Service, hint.Message)
+			if hint.NextCommand != "" {
+				_, _ = fmt.Fprintf(w, "    next: %s\n", hint.NextCommand)
+			}
+		}
+	}
 }
 
 func defaultSocket(stateDir string) string {

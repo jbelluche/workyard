@@ -14,7 +14,7 @@ func TestControlCommandShortDescriptionsAreDescriptive(t *testing.T) {
 		"stop":    "Stop services on a worker (all services when none are named)",
 		"restart": "Restart services on a worker (all services when none are named)",
 		"status":  "Show current service status for a run",
-		"inspect": "Show detailed service state, hints, and recent events",
+		"inspect": "Show detailed service state, hints, and recent errors",
 		"urls":    "Show service preview URLs for a run",
 		"probe":   "Probe a service health endpoint from the worker",
 	}
@@ -61,7 +61,7 @@ func TestRootHelpGroupsCommandsByWorkflow(t *testing.T) {
 		"  probe       Probe a service health endpoint from the worker",
 		"Runtime Inspection",
 		"  status      Show current service status for a run",
-		"  inspect     Show detailed service state, hints, and recent events",
+		"  inspect     Show detailed service state, hints, and recent errors",
 		"  logs        Read bounded service logs",
 		"  events      Read lifecycle events",
 		"  urls        Show service preview URLs for a run",
