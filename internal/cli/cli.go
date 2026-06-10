@@ -3234,9 +3234,21 @@ func remoteControl(cmd *cobra.Command, opts *options, loaded config.Loaded, acti
 		_, _ = io.WriteString(cmd.ErrOrStderr(), res.Stderr)
 	}
 	if err != nil {
-		return printedError{err: err, exitCode: 1}
+		if strings.TrimSpace(res.Stdout) != "" {
+			// The remote daemonctl already printed its error payload above.
+			return printedError{err: err, exitCode: 1}
+		}
+		return output.NewError("REMOTE_COMMAND_FAILED", fmt.Sprintf("%s on %s: %s", action, opts.worker, truncateForDisplay(err.Error(), 2048)), "Check SSH connectivity to the worker or rerun with --verbose")
 	}
 	return nil
+}
+
+func truncateForDisplay(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max] + " ... (truncated)"
 }
 
 func printDaemonResponse(w io.Writer, res worker.Response, jsonOut bool, action string) error {
