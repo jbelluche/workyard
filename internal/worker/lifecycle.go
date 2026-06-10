@@ -354,7 +354,7 @@ func selectServices(cfg config.Config, requested []string, allowAll bool) ([]str
 	var out []string
 	for _, name := range requested {
 		if _, ok := cfg.Services[name]; !ok {
-			return nil, fmt.Errorf("unknown service %q", name)
+			return nil, fmt.Errorf("unknown service %q (configured services: %s)", name, strings.Join(config.ServiceNames(cfg.Services), ", "))
 		}
 		out = append(out, name)
 	}

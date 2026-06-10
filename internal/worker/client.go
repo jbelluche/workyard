@@ -2,15 +2,20 @@ package worker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"time"
 )
 
+// ErrDaemonUnreachable marks transport-level failures (no daemon listening on
+// the socket) as opposed to errors the daemon itself returned.
+var ErrDaemonUnreachable = errors.New("daemon unreachable")
+
 func Call(socket string, req Request) (Response, error) {
 	conn, err := net.DialTimeout("unix", socket, 5*time.Second)
 	if err != nil {
-		return Response{}, err
+		return Response{}, fmt.Errorf("%w: %v", ErrDaemonUnreachable, err)
 	}
 	defer conn.Close()
 	if err := json.NewEncoder(conn).Encode(req); err != nil {

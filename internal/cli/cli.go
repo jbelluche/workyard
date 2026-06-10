@@ -3044,8 +3044,21 @@ func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, actio
 		ConfigPath:       loaded.Config.Path,
 	})
 	res, err := localDaemonCall(cmd.Context(), opts, paths, action, services, extra)
-	if err != nil {
-		return output.NewError("DAEMONCTL_FAILED", err.Error(), "Run workyard daemon start")
+	if err != nil && res.Error == nil {
+		if action == "stop" && errors.Is(err, worker.ErrDaemonUnreachable) {
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), worker.Response{OK: true, Message: "daemon not running; nothing to stop"})
+			}
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "nothing to stop (daemon not running)")
+			return nil
+		}
+		if output.AsCommandError(err) != nil {
+			return err
+		}
+		if errors.Is(err, worker.ErrDaemonUnreachable) {
+			return output.NewError("DAEMON_UNREACHABLE", err.Error(), "Run workyard daemon start")
+		}
+		return output.NewError("DAEMONCTL_FAILED", err.Error(), "")
 	}
 	return printDaemonResponse(cmd.OutOrStdout(), res, opts.json || action == "open", action)
 }
