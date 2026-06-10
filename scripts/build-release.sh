@@ -3,6 +3,7 @@ set -eu
 
 VERSION="${VERSION:-0.1.0}"
 OUT_DIR="${OUT_DIR:-dist/release}"
+LDFLAGS="-s -w -X github.com/jackbelluche/workyard/internal/cli.Version=${VERSION}"
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
@@ -15,7 +16,7 @@ linux arm64'
 printf '%s\n' "$targets" | while read -r os arch; do
   [ -n "$os" ] || continue
   name="workyard-${os}-${arch}"
-  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "$OUT_DIR/$name" ./cmd/workyard
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="$LDFLAGS" -o "$OUT_DIR/$name" ./cmd/workyard
   tar -C "$OUT_DIR" -czf "$OUT_DIR/${name}.tar.gz" "$name"
 done
 

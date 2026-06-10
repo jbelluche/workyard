@@ -20,6 +20,7 @@ type Request struct {
 
 type Response struct {
 	OK       bool           `json:"ok"`
+	Version  string         `json:"version,omitempty"`
 	Project  string         `json:"project,omitempty"`
 	RunID    string         `json:"runId,omitempty"`
 	Worker   string         `json:"worker,omitempty"`

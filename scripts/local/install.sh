@@ -114,7 +114,8 @@ trap cleanup EXIT
 printf 'building workyard from %s\n' "$REPO_ROOT"
 (
   cd "$REPO_ROOT"
-  go build -o "$TMP_DIR/workyard" ./cmd/workyard
+  VERSION="$(git describe --tags --always --dirty 2>/dev/null || printf '0.1.0')"
+  go build -ldflags "-X github.com/jackbelluche/workyard/internal/cli.Version=${VERSION}" -o "$TMP_DIR/workyard" ./cmd/workyard
 )
 
 if [[ ! -x "$TMP_DIR/workyard" ]]; then

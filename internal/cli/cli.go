@@ -33,7 +33,10 @@ import (
 	"golang.org/x/term"
 )
 
-const Version = "0.1.0"
+// Version is stamped at build time via:
+//
+//	-ldflags "-X github.com/jackbelluche/workyard/internal/cli.Version=<version>"
+var Version = "0.1.0"
 
 const (
 	commandGroupPrimary     = "primary"
@@ -2181,6 +2184,7 @@ func remoteDaemonCall(ctx context.Context, opts *options, paths remote.Paths, ac
 	if err := json.Unmarshal([]byte(out.Stdout), &res); err != nil {
 		return worker.Response{}, fmt.Errorf("decode %s response: %w", action, err)
 	}
+	warnDaemonVersion(os.Stderr, opts, res.Version)
 	if !res.OK {
 		if res.Error != nil {
 			return res, fmt.Errorf("%s: %s", res.Error.Code, res.Error.Message)
@@ -2328,7 +2332,7 @@ func daemonCommand(opts *options) *cobra.Command {
 			} else if !opts.quiet {
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "workyard daemon starting")
 			}
-			return worker.Serve(cmd.Context(), worker.DaemonOptions{StateDir: opts.stateDir, Socket: opts.socket, AllowRoot: allowRoot})
+			return worker.Serve(cmd.Context(), worker.DaemonOptions{StateDir: opts.stateDir, Socket: opts.socket, AllowRoot: allowRoot, Version: Version})
 		},
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", true, "run in the foreground")
@@ -2379,13 +2383,29 @@ func daemonStatusCommand(opts *options) *cobra.Command {
 				return nil
 			}
 			if opts.json {
-				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "socket": socket, "message": res.Message})
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "socket": socket, "version": res.Version, "message": res.Message})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon running (%s)\n", socket)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon running (%s) version=%s\n", socket, firstNonEmpty(res.Version, "unknown"))
+			warnDaemonVersion(cmd.ErrOrStderr(), opts, res.Version)
 			return nil
 		},
 	}
 	return cmd
+}
+
+var daemonVersionWarned bool
+
+// warnDaemonVersion prints a one-time warning when the daemon that answered is
+// not the same build as this CLI. Empty versions (pre-stamped daemons) are skipped.
+func warnDaemonVersion(w io.Writer, opts *options, daemonVersion string) {
+	if daemonVersionWarned || opts.quiet || opts.json {
+		return
+	}
+	if daemonVersion == "" || daemonVersion == Version {
+		return
+	}
+	daemonVersionWarned = true
+	_, _ = fmt.Fprintf(w, "warning: daemon version %s does not match CLI version %s; restart it with workyard daemon stop && workyard daemon start\n", daemonVersion, Version)
 }
 
 func startLocalDaemon(cmd *cobra.Command, opts *options, allowRoot bool) error {
@@ -2997,7 +3017,7 @@ func localDaemonCall(ctx context.Context, opts *options, paths remote.Paths, act
 			return worker.Response{}, err
 		}
 	}
-	return worker.Call(socket, worker.Request{
+	res, err := worker.Call(socket, worker.Request{
 		Action:   action,
 		RunRoot:  paths.RunRoot,
 		Project:  paths.Project,
@@ -3012,6 +3032,8 @@ func localDaemonCall(ctx context.Context, opts *options, paths remote.Paths, act
 		Status:   extra.Status,
 		Timeout:  extra.Timeout,
 	})
+	warnDaemonVersion(os.Stderr, opts, res.Version)
+	return res, err
 }
 
 func actionNeedsLocalSource(action string) bool {

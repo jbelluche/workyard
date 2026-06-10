@@ -181,6 +181,42 @@ func TestServeShutdownReturnsNil(t *testing.T) {
 	}
 }
 
+func TestServeResponsesIncludeDaemonVersion(t *testing.T) {
+	stateDir, err := os.MkdirTemp("/tmp", "workyard-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stateDir)
+	socket, err := managedSocketPath(stateDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Serve(ctx, DaemonOptions{StateDir: stateDir, AllowRoot: true, Version: "9.9.9-test"})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		res, err := Call(socket, Request{Action: "ping"})
+		if err == nil {
+			if res.Version != "9.9.9-test" {
+				t.Fatalf("expected ping response version 9.9.9-test, got %q", res.Version)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon did not become ready: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := Call(socket, Request{Action: "shutdown"}); err != nil {
+		t.Fatal(err)
+	}
+	<-errCh
+}
+
 func startSleepProcess(t *testing.T) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("sh", "-c", "sleep 60")

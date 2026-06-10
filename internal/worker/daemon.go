@@ -18,6 +18,7 @@ type DaemonOptions struct {
 	StateDir  string
 	Socket    string
 	AllowRoot bool
+	Version   string
 }
 
 type Daemon struct {
@@ -352,6 +353,7 @@ func (d *Daemon) handle(conn net.Conn) {
 		return
 	}
 	res := d.dispatch(req)
+	res.Version = d.opts.Version
 	_ = json.NewEncoder(conn).Encode(res)
 }
 
