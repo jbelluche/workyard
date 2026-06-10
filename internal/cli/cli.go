@@ -2607,19 +2607,26 @@ var (
 
 func controlCommand(opts *options, action string) *cobra.Command {
 	use := action + " [service...]"
-	if action == "status" || action == "inspect" || action == "urls" {
+	var positional cobra.PositionalArgs
+	switch action {
+	case "status", "inspect":
 		use = action
+		positional = cobra.NoArgs
+	case "probe":
+		use = "probe <service>"
+		positional = cobra.ExactArgs(1)
 	}
 	var all bool
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: controlCommandShort(action),
+		Args:  positional,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControl(cmd, opts, action, args, controlExtra{All: all})
 		},
 	}
 	if action == "stop" {
-		cmd.Flags().BoolVar(&all, "all", false, "Stop all services")
+		cmd.Flags().BoolVar(&all, "all", false, "stop all services (the default when no services are named)")
 	}
 	return cmd
 }
@@ -2631,11 +2638,11 @@ func controlCommandShort(action string) string {
 	case "build":
 		return "Run the configured build command for a project run"
 	case "start":
-		return "Start one or more services on a worker"
+		return "Start services on a worker (all services when none are named)"
 	case "stop":
-		return "Stop one or more services on a worker"
+		return "Stop services on a worker (all services when none are named)"
 	case "restart":
-		return "Restart one or more services on a worker"
+		return "Restart services on a worker (all services when none are named)"
 	case "status":
 		return "Show current service status for a run"
 	case "inspect":
@@ -2821,6 +2828,7 @@ func eventsCommand(opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "events",
 		Short: "Read lifecycle events",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControl(cmd, opts, "events", args, controlExtra{Tail: tail, MaxBytes: maxBytes})
 		},
@@ -2835,9 +2843,8 @@ func waitCommand(opts *options) *cobra.Command {
 	var status string
 	var timeout string
 	cmd := &cobra.Command{
-		Use:   "wait <service...>",
-		Short: "Wait for service state or health",
-		Args:  cobra.MinimumNArgs(1),
+		Use:   "wait [service...]",
+		Short: "Wait for service state or health (all services when none are named)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControl(cmd, opts, "wait", args, controlExtra{Healthy: healthy, Status: status, Timeout: timeout})
 		},
@@ -2909,6 +2916,12 @@ func runControl(cmd *cobra.Command, opts *options, action string, services []str
 	if err != nil {
 		return output.NewError("CONFIG_LOAD_FAILED", err.Error(), "")
 	}
+	if err := validateServiceArgs(loaded.Config, action, services); err != nil {
+		return err
+	}
+	if action == "wait" && len(services) == 0 {
+		services = config.ServiceNames(loaded.Config.Services)
+	}
 	run := opts.run
 	if run == "" {
 		run = runid.Default(loaded.Config.Root)
@@ -2921,6 +2934,34 @@ func runControl(cmd *cobra.Command, opts *options, action string, services []str
 		return localControl(cmd, opts, loaded, action, run, services, extra)
 	}
 	return remoteControl(cmd, opts, loaded, action, run, services, extra)
+}
+
+// validateServiceArgs rejects unknown service names before any daemon or SSH
+// round trip, so typos fail fast with the same error locally and remotely.
+// logs additionally accepts the setup/build and per-service lifecycle targets.
+func validateServiceArgs(cfg config.Config, action string, services []string) error {
+	if len(services) == 0 {
+		return nil
+	}
+	names := config.ServiceNames(cfg.Services)
+	valid := map[string]bool{}
+	for _, name := range names {
+		valid[name] = true
+	}
+	if action == "logs" {
+		valid["setup"] = true
+		valid["build"] = true
+		for _, name := range names {
+			valid[name+".beforeStart"] = true
+			valid[name+".onClose"] = true
+		}
+	}
+	for _, svc := range services {
+		if !valid[svc] {
+			return output.NewError("SERVICE_UNKNOWN", fmt.Sprintf("unknown service %q", svc), "Configured services: "+strings.Join(names, ", "))
+		}
+	}
+	return nil
 }
 
 func requireWorker(opts *options, command string) error {
