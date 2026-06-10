@@ -2,6 +2,7 @@ package worker
 
 import (
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -13,7 +14,14 @@ func currentProcessID(pid int) ProcessID {
 		return ProcessID{}
 	}
 	pgid, _ := syscall.Getpgid(pid)
-	return ProcessID{PID: pid, PGID: pgid, StartTime: linuxProcessStartTime(pid)}
+	return ProcessID{PID: pid, PGID: pgid, StartTime: processStartTime(pid)}
+}
+
+func processStartTime(pid int) string {
+	if runtime.GOOS == "linux" {
+		return linuxProcessStartTime(pid)
+	}
+	return psProcessStartTime(pid)
 }
 
 func processIdentityMatches(expected ProcessID) bool {
@@ -54,4 +62,14 @@ func linuxProcessStartTime(pid int) string {
 		return ""
 	}
 	return fields[19]
+}
+
+// psProcessStartTime captures a start-time identity on platforms without
+// /proc (macOS, BSD) so PID reuse cannot defeat stale-process detection.
+func psProcessStartTime(pid int) string {
+	out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

@@ -58,7 +58,18 @@ func loadState(runRoot, project, runID, workerName string) (RunState, error) {
 	return st, nil
 }
 
+// saveState reports failures to the daemon log (deduped per path) in addition
+// to returning them, because several lifecycle paths can only treat a state
+// write as best-effort and previously dropped the error silently.
 func saveState(runRoot string, st RunState) error {
+	if err := saveStateFile(runRoot, st); err != nil {
+		reportWriteFailure("state file", statePath(runRoot), err)
+		return err
+	}
+	return nil
+}
+
+func saveStateFile(runRoot string, st RunState) error {
 	st.UpdatedAt = time.Now().UTC()
 	if err := os.MkdirAll(filepath.Dir(statePath(runRoot)), 0o700); err != nil {
 		return err
@@ -70,6 +81,7 @@ func saveState(runRoot string, st RunState) error {
 	}
 	data = append(data, '\n')
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, statePath(runRoot))
