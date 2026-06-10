@@ -2,6 +2,8 @@
 
 Workyard is an agent-first remote development runner. It syncs a local project to a private worker over SSH, starts configured services through a worker daemon, tracks health and lifecycle events, and exposes a local dashboard for monitoring what is running.
 
+Workyard never infers a target machine: every command names its worker with `--worker`, so a user or agent cannot act on the wrong machine by accident. Use `--worker localhost` for this machine or a registered worker name (shell completion offers both).
+
 > **Warning**
 > Workyard should only be installed and run on machines you trust. It syncs project files, starts configured commands, manages local/remote processes, and reads bounded logs over SSH.
 
@@ -15,7 +17,7 @@ cd workyard
 scripts/local/install.sh
 ```
 
-The local installer builds Workyard from source, installs it to `~/.local/bin/workyard`, and adds a marked PATH block to `~/.zshrc` when needed.
+The local installer supports macOS and Linux. It builds Workyard from source, installs it to `~/.local/bin/workyard`, and adds a marked PATH block to your shell profile (`~/.zshrc` or `~/.bashrc`) when needed.
 
 Uninstall the local binary:
 
@@ -71,19 +73,7 @@ For a Linux ARM64 worker, such as a Raspberry Pi:
 GOOS=linux GOARCH=arm64 go build -o dist/workyard-linux-arm64 ./cmd/workyard
 ```
 
-Install the local binary somewhere on your `PATH`:
-
-```sh
-scripts/local/install.sh
-```
-
-The local installer currently supports macOS. It builds Workyard from this checkout, installs it to `~/.local/bin/workyard`, and adds a marked PATH block to `~/.zshrc` when needed.
-
-Uninstall the local binary:
-
-```sh
-scripts/local/uninstall.sh
-```
+Install the local binary somewhere on your `PATH` with `scripts/local/install.sh` (see [Install](#install)).
 
 Install or upgrade the worker binary on the remote machine:
 
@@ -146,11 +136,11 @@ workyard --worker user@worker-host urls
 workyard --worker user@worker-host inspect
 ```
 
-For local fixture/dev runs without `--worker`, Workyard uses a private background daemon on your machine and prepares a local managed run under `~/.workyard/runs`:
+For local fixture/dev runs, pass `--worker localhost`. Workyard uses a private background daemon on your machine (auto-started when needed) and prepares a local managed run under `~/.workyard/runs`:
 
 ```sh
 workyard daemon start
-workyard build
+workyard --worker localhost build
 workyard daemon status
 workyard daemon stop
 ```
@@ -163,10 +153,10 @@ workyard --worker user@worker-host logs web --follow
 workyard --worker user@worker-host events
 ```
 
-Stop services:
+Stop services (all services when none are named):
 
 ```sh
-workyard --worker user@worker-host stop --all
+workyard --worker user@worker-host stop
 ```
 
 Clean logs or remove a run:
@@ -503,7 +493,7 @@ workyard --worker user@worker-host events
 workyard --worker user@worker-host wait web --healthy
 workyard --worker user@worker-host probe web
 workyard --worker user@worker-host restart web
-workyard --worker user@worker-host stop --all
+workyard --worker user@worker-host stop
 workyard --worker user@worker-host watch
 ```
 
@@ -593,6 +583,12 @@ go build -o dist/workyard-darwin-arm64 ./cmd/workyard
 GOOS=linux GOARCH=arm64 go build -o dist/workyard-linux-arm64 ./cmd/workyard
 ```
 
+`workyard install` and `workyard workers setup` build the matching artifact automatically when `dist/` is missing it and the Go toolchain is available.
+
+## Exit Codes
+
+Errors exit with a class so scripts and agents can branch on the kind of failure: `1` generic, `2` usage or configuration, `3` SSH/Tailscale connectivity, `4` worker daemon, `5` health/wait timeout. See [docs/errors.md](docs/errors.md) for the code-by-code mapping.
+
 Try the bundled fixture:
 
 ```sh
@@ -605,7 +601,7 @@ With a worker:
 ```sh
 workyard deploy fixtures/health-server --worker user@worker-host --fresh
 workyard --project fixtures/health-server --worker user@worker-host status
-workyard --project fixtures/health-server --worker user@worker-host stop --all
+workyard --project fixtures/health-server --worker user@worker-host stop
 ```
 
 ## Status

@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# macOS-only local development uninstaller.
-# Linux support can be added later by expanding the platform checks and shell
-# profile handling.
+# Local development uninstaller for macOS and Linux.
+
+detect_shell_rc() {
+  case "${SHELL:-}" in
+    */zsh) printf '%s' "$HOME/.zshrc" ;;
+    */bash) printf '%s' "$HOME/.bashrc" ;;
+    *) printf '' ;;
+  esac
+}
 
 INSTALL_DIR="${WORKYARD_INSTALL_DIR:-$HOME/.local/bin}"
-SHELL_RC="${WORKYARD_SHELL_RC:-$HOME/.zshrc}"
+SHELL_RC="${WORKYARD_SHELL_RC:-$(detect_shell_rc)}"
 REMOVE_SHELL=1
 FORCE=0
 
@@ -55,10 +61,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  printf 'scripts/local/uninstall.sh currently supports macOS only. Linux support can be added later.\n' >&2
-  exit 1
-fi
+case "$(uname -s)" in
+  Darwin|Linux) ;;
+  *)
+    printf 'scripts/local/uninstall.sh supports macOS and Linux only.\n' >&2
+    exit 1
+    ;;
+esac
 
 if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
   printf 'HOME is not set to a valid directory\n' >&2
@@ -111,7 +120,7 @@ else
   printf 'removed %s\n' "$DEST"
 fi
 
-if [[ "$REMOVE_SHELL" -eq 1 && -f "$SHELL_RC" ]]; then
+if [[ "$REMOVE_SHELL" -eq 1 && -n "$SHELL_RC" && -f "$SHELL_RC" ]]; then
   if grep -Fq '# >>> workyard local install >>>' "$SHELL_RC"; then
     TMP_FILE="$(mktemp)"
     awk '

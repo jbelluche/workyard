@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# macOS-only local development installer.
-# Linux support can be added later by expanding the platform checks and shell
-# profile handling.
+# Local development installer for macOS and Linux.
+
+detect_shell_rc() {
+  case "${SHELL:-}" in
+    */zsh) printf '%s' "$HOME/.zshrc" ;;
+    */bash) printf '%s' "$HOME/.bashrc" ;;
+    *) printf '' ;;
+  esac
+}
 
 INSTALL_DIR="${WORKYARD_INSTALL_DIR:-$HOME/.local/bin}"
-SHELL_RC="${WORKYARD_SHELL_RC:-$HOME/.zshrc}"
+SHELL_RC="${WORKYARD_SHELL_RC:-$(detect_shell_rc)}"
 UPDATE_SHELL=1
 
 usage() {
@@ -17,12 +23,13 @@ Builds Workyard from this checkout and installs it as DIR/workyard.
 
 Options:
   --install-dir DIR     Install directory. Defaults to ~/.local/bin.
-  --no-shell-update     Do not add the install directory to ~/.zshrc.
+  --no-shell-update     Do not add the install directory to the shell profile.
   -h, --help            Show this help.
 
 Environment:
   WORKYARD_INSTALL_DIR  Default install directory override.
-  WORKYARD_SHELL_RC     Shell profile to update. Defaults to ~/.zshrc.
+  WORKYARD_SHELL_RC     Shell profile to update. Detected from $SHELL
+                        (~/.zshrc for zsh, ~/.bashrc for bash).
 USAGE
 }
 
@@ -49,10 +56,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  printf 'scripts/local/install.sh currently supports macOS only. Linux support can be added later.\n' >&2
-  exit 1
-fi
+case "$(uname -s)" in
+  Darwin|Linux) ;;
+  *)
+    printf 'scripts/local/install.sh supports macOS and Linux only.\n' >&2
+    exit 1
+    ;;
+esac
 
 if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
   printf 'HOME is not set to a valid directory\n' >&2
@@ -127,15 +137,27 @@ fi
 install -m 755 "$TMP_DIR/workyard" "$DEST"
 
 if [[ "$UPDATE_SHELL" -eq 1 ]]; then
-  touch "$SHELL_RC"
-  chmod go-rwx "$SHELL_RC" 2>/dev/null || true
-  if ! grep -Fq '# >>> workyard local install >>>' "$SHELL_RC"; then
-    {
-      printf '\n# >>> workyard local install >>>\n'
-      printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR_REAL"
-      printf '# <<< workyard local install <<<\n'
-    } >> "$SHELL_RC"
-    printf 'added %s to PATH in %s\n' "$INSTALL_DIR_REAL" "$SHELL_RC"
+  if [[ -n "$SHELL_RC" ]]; then
+    touch "$SHELL_RC"
+    chmod go-rwx "$SHELL_RC" 2>/dev/null || true
+    if ! grep -Fq '# >>> workyard local install >>>' "$SHELL_RC"; then
+      {
+        printf '\n# >>> workyard local install >>>\n'
+        printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR_REAL"
+        printf '# <<< workyard local install <<<\n'
+      } >> "$SHELL_RC"
+      printf 'added %s to PATH in %s\n' "$INSTALL_DIR_REAL" "$SHELL_RC"
+      printf 'restart your shell (or source %s) to pick up the new PATH\n' "$SHELL_RC"
+    fi
+  else
+    case "${SHELL:-}" in
+      */fish)
+        printf 'add the install directory to fish with:\n  fish_add_path %s\n' "$INSTALL_DIR_REAL"
+        ;;
+      *)
+        printf 'add the install directory to your shell profile manually:\n  export PATH="%s:$PATH"\n' "$INSTALL_DIR_REAL"
+        ;;
+    esac
   fi
 fi
 
