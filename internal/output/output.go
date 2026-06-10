@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 )
 
 type Error struct {
@@ -28,8 +29,36 @@ func (e *CommandError) Error() string {
 	return e.Message
 }
 
+// Exit code classes, applied by error code. Documented in docs/errors.md.
+const (
+	ExitGeneric      = 1 // unclassified failures
+	ExitUsage        = 2 // bad arguments, invalid or missing configuration
+	ExitConnectivity = 3 // SSH or Tailscale failures
+	ExitDaemon       = 4 // worker daemon transport or daemon-reported failures
+	ExitWait         = 5 // health or status wait timeouts
+)
+
+// ExitCodeFor classifies an error code into an exit code class so scripts
+// and agents can branch on the kind of failure.
+func ExitCodeFor(code string) int {
+	switch code {
+	case "WORKER_REQUIRED", "SERVICE_UNKNOWN", "SERVICE_SELECTION_FAILED", "CONFIG_EXISTS", "PRUNE_AGE_REQUIRED", "RUN_AMBIGUOUS":
+		return ExitUsage
+	case "SSH_FAILED", "REMOTE_COMMAND_FAILED", "WORKER_PLATFORM_FAILED", "TAILSCALE_DISCOVER_FAILED":
+		return ExitConnectivity
+	case "DAEMON_UNREACHABLE", "DAEMON_START_FAILED", "DAEMON_STOP_FAILED", "DAEMONCTL_FAILED", "DAEMON_FAILED":
+		return ExitDaemon
+	case "WAIT_TIMEOUT", "WAIT_FAILED":
+		return ExitWait
+	}
+	if strings.HasPrefix(code, "CONFIG_") || strings.HasPrefix(code, "DEPLOY_ARGS") || strings.HasSuffix(code, "_INVALID") {
+		return ExitUsage
+	}
+	return ExitGeneric
+}
+
 func NewError(code, message, hint string) *CommandError {
-	return &CommandError{Code: code, Message: message, Hint: hint, ExitCode: 1}
+	return &CommandError{Code: code, Message: message, Hint: hint, ExitCode: ExitCodeFor(code)}
 }
 
 func NewExitError(code, message, hint string, exitCode int) *CommandError {

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -131,5 +132,27 @@ func TestWriteUsesPrivatePermissions(t *testing.T) {
 	}
 	if got := stat.Mode().Perm(); got != 0o600 {
 		t.Fatalf("mode=%#o, want 0600", got)
+	}
+}
+
+func TestLoadRewritesUnknownFieldErrors(t *testing.T) {
+	dir := t.TempDir()
+	content := "name: bad\nservices:\n  web:\n    startCmd: npm run dev\n"
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("expected unknown field to be rejected")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `unknown field "startCmd"`) {
+		t.Fatalf("missing friendly message: %s", msg)
+	}
+	if !strings.Contains(msg, `did you mean "startCommand"`) {
+		t.Fatalf("missing suggestion: %s", msg)
+	}
+	if strings.Contains(msg, "config.Service") {
+		t.Fatalf("leaked Go type name: %s", msg)
 	}
 }

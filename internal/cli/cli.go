@@ -307,13 +307,21 @@ func runsCommand(opts *options) *cobra.Command {
 	}
 	remove := &cobra.Command{
 		Use:   "remove <worker> <project> <run>",
-		Short: "Remove a run from the local monitor registry",
+		Short: "Remove a run from the local monitor registry (accepts registered worker names)",
 		Args:  cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store := registry.New(registry.DefaultPath(opts.stateDir))
 			removed, err := store.Remove(args[0], args[1], args[2])
 			if err != nil {
 				return output.NewError("REGISTRY_REMOVE_FAILED", err.Error(), "")
+			}
+			if !removed {
+				if resolved, rerr := resolveWorkerTarget(opts.stateDir, args[0]); rerr == nil && resolved != args[0] {
+					removed, err = store.Remove(resolved, args[1], args[2])
+					if err != nil {
+						return output.NewError("REGISTRY_REMOVE_FAILED", err.Error(), "")
+					}
+				}
 			}
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "removed": removed})

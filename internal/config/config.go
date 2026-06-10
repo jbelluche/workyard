@@ -291,12 +291,95 @@ func Load(projectPath string) (Loaded, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
-		return Loaded{}, fmt.Errorf("parse %s: %w", path, err)
+		return Loaded{}, fmt.Errorf("parse %s: %w", path, friendlyYAMLError(err))
 	}
 	cfg.Path = path
 	cfg.Root = root
 	warnings, err := Validate(&cfg)
 	return Loaded{Config: cfg, Warnings: warnings}, err
+}
+
+var unknownFieldRE = regexp.MustCompile(`line (\d+): field (\S+) not found in type (\S+)`)
+
+// knownYAMLFields maps the Go type names yaml.v3 reports to the YAML field
+// names users actually type, for unknown-field suggestions.
+var knownYAMLFields = map[string][]string{
+	"config.Config":  {"name", "sync", "worker", "setup", "build", "services"},
+	"config.Service": {"path", "startCommand", "shell", "port", "env", "health", "beforeStart", "onClose", "watch"},
+}
+
+// friendlyYAMLError rewrites yaml.v3 strict-mode errors ("field X not found
+// in type config.Service") into plain language with a did-you-mean
+// suggestion, instead of leaking Go type names.
+func friendlyYAMLError(err error) error {
+	matches := unknownFieldRE.FindAllStringSubmatch(err.Error(), -1)
+	if len(matches) == 0 {
+		return err
+	}
+	parts := make([]string, 0, len(matches))
+	for _, m := range matches {
+		line, field, typeName := m[1], m[2], m[3]
+		msg := fmt.Sprintf("line %s: unknown field %q", line, field)
+		if suggestion := closestField(field, knownYAMLFields[typeName]); suggestion != "" {
+			msg += fmt.Sprintf(" (did you mean %q?)", suggestion)
+		}
+		parts = append(parts, msg)
+	}
+	return errors.New(strings.Join(parts, "; "))
+}
+
+func closestField(field string, candidates []string) string {
+	field = strings.ToLower(field)
+	best := ""
+	bestDistance := 3
+	for _, candidate := range candidates {
+		d := editDistance(field, strings.ToLower(candidate))
+		if d < bestDistance {
+			bestDistance = d
+			best = candidate
+		}
+	}
+	if best != "" {
+		return best
+	}
+	// Abbreviations like startCmd share a long prefix with the real field
+	// even when the edit distance is large.
+	bestPrefix := 3
+	for _, candidate := range candidates {
+		if n := commonPrefixLen(field, strings.ToLower(candidate)); n > bestPrefix {
+			bestPrefix = n
+			best = candidate
+		}
+	}
+	return best
+}
+
+func commonPrefixLen(a, b string) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return n
+}
+
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(min(cur[j-1]+1, prev[j]+1), prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
 }
 
 func Write(path string, cfg Config) error {
