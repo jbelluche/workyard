@@ -118,7 +118,7 @@ func newRoot(opts *options) *cobra.Command {
 	cobra.EnableCommandSorting = false
 	root := &cobra.Command{
 		Use:           "workyard",
-		Short:         "Agent-first remote development runner",
+		Short:         "Remote development runner",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
