@@ -58,3 +58,48 @@ func TestServiceLifecycleEnvIncludesRuntimePort(t *testing.T) {
 		t.Fatalf("missing runtime env values: %#v", env)
 	}
 }
+
+func TestServiceEnvForRunIncludesPeerServiceURLs(t *testing.T) {
+	env := serviceEnvForRun(
+		config.Service{Port: config.PortConfig{Default: 3000, Env: "PORT"}},
+		3201,
+		[]ServiceState{
+			{Name: "api", AssignedPort: 3201},
+			{Name: "analytics-worker", AssignedPort: 3202},
+		},
+	)
+	want := map[string]string{
+		"WORKYARD_SERVICE_API_PORT":              "3201",
+		"WORKYARD_SERVICE_API_URL":               "http://127.0.0.1:3201",
+		"WORKYARD_SERVICE_ANALYTICS_WORKER_PORT": "3202",
+		"WORKYARD_SERVICE_ANALYTICS_WORKER_URL":  "http://127.0.0.1:3202",
+	}
+	for key, value := range want {
+		if !envContainsValue(env, key, value) {
+			t.Fatalf("missing %s=%s in %#v", key, value, env)
+		}
+	}
+}
+
+func TestAllocatePortTreatsPreparingAsReserved(t *testing.T) {
+	st := RunState{Services: map[string]ServiceState{
+		"api": {Status: "preparing", AssignedPort: 3210},
+	}}
+	got, err := allocatePort(st, "events", 3210, portRange{Start: 3210, End: 3211})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == 3210 {
+		t.Fatalf("allocated reserved preparing port %d", got)
+	}
+}
+
+func envContainsValue(env []string, key, value string) bool {
+	want := key + "=" + value
+	for _, item := range env {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}

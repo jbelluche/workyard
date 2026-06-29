@@ -16,6 +16,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type startPlan struct {
+	Name     string
+	Service  config.Service
+	Assigned int
+	Cwd      string
+}
+
 func (d *Daemon) start(req Request) Response {
 	loaded, err := config.Load(sourceRoot(req.RunRoot))
 	if err != nil {
@@ -29,18 +36,17 @@ func (d *Daemon) start(req Request) Response {
 	if err != nil {
 		return errorResponse("PORT_RANGE_INVALID", err.Error(), "")
 	}
+	plans := make([]startPlan, 0, len(names))
+	d.mu.Lock()
+	st, err := loadState(req.RunRoot, loaded.Config.Name, req.RunID, workerName(req.Worker))
+	if err != nil {
+		d.mu.Unlock()
+		return errorResponse("STATE_LOAD_FAILED", err.Error(), "")
+	}
 	for _, name := range names {
 		svc := loaded.Config.Services[name]
-		d.mu.Lock()
-		st, err := loadState(req.RunRoot, loaded.Config.Name, req.RunID, workerName(req.Worker))
-		if err != nil {
-			d.mu.Unlock()
-			return errorResponse("STATE_LOAD_FAILED", err.Error(), "")
-		}
 		if existing, ok := st.Services[name]; ok && existing.PID > 0 && processIdentityMatches(existing.Process) && isRunningStatus(existing.Status) {
 			st.Services[name] = refreshURL(existing, st.Worker)
-			_ = saveState(req.RunRoot, st)
-			d.mu.Unlock()
 			continue
 		}
 		assigned := 0
@@ -70,32 +76,39 @@ func (d *Daemon) start(req Request) Response {
 		}
 		preparing = refreshURL(preparing, st.Worker)
 		st.Services[name] = preparing
-		if err := saveState(req.RunRoot, st); err != nil {
-			d.mu.Unlock()
-			return errorResponse("STATE_SAVE_FAILED", err.Error(), "")
-		}
+		plans = append(plans, startPlan{Name: name, Service: svc, Assigned: assigned, Cwd: cwd})
+	}
+	if err := saveState(req.RunRoot, st); err != nil {
 		d.mu.Unlock()
+		return errorResponse("STATE_SAVE_FAILED", err.Error(), "")
+	}
+	d.mu.Unlock()
 
-		if svc.BeforeStart != nil {
+	for _, plan := range plans {
+		if plan.Service.BeforeStart != nil {
+			runtimeState, loadErr := loadState(req.RunRoot, loaded.Config.Name, req.RunID, workerName(req.Worker))
+			if loadErr != nil {
+				return errorResponse("STATE_LOAD_FAILED", loadErr.Error(), "")
+			}
 			if err := runLifecycleCommand(req.RunRoot, lifecycleRun{
 				Name:        "beforeStart",
-				Service:     name,
-				Command:     *svc.BeforeStart,
-				Cwd:         cwd,
-				Env:         serviceLifecycleEnv(svc, assigned),
+				Service:     plan.Name,
+				Command:     *plan.Service.BeforeStart,
+				Cwd:         plan.Cwd,
+				Env:         serviceLifecycleEnvForRun(plan.Service, plan.Assigned, runtimeState),
 				EventPrefix: "service.beforeStart",
 			}); err != nil {
 				d.mu.Lock()
 				st, loadErr := loadState(req.RunRoot, loaded.Config.Name, req.RunID, workerName(req.Worker))
 				if loadErr == nil {
-					failed := st.Services[name]
+					failed := st.Services[plan.Name]
 					failed.Status = "failed"
 					failed.Healthy = false
-					st.Services[name] = failed
+					st.Services[plan.Name] = failed
 					_ = saveState(req.RunRoot, st)
 				}
 				d.mu.Unlock()
-				return errorResponse("BEFORE_START_FAILED", err.Error(), "Run workyard logs "+name+" --tail 200")
+				return errorResponse("BEFORE_START_FAILED", err.Error(), "Run workyard logs "+plan.Name+" --tail 200")
 			}
 		}
 
@@ -105,20 +118,20 @@ func (d *Daemon) start(req Request) Response {
 			d.mu.Unlock()
 			return errorResponse("STATE_LOAD_FAILED", err.Error(), "")
 		}
-		state, err := d.startService(req.RunRoot, st, name, svc, assigned)
+		state, err := d.startService(req.RunRoot, st, plan.Name, plan.Service, plan.Assigned)
 		if err != nil {
 			d.mu.Unlock()
-			appendEvent(req.RunRoot, Event{Type: "service.start_failed", Service: name, Message: err.Error()})
-			return errorResponse("SERVICE_START_FAILED", fmt.Sprintf("%s: %s", name, err), "Run workyard logs "+name+" --tail 200")
+			appendEvent(req.RunRoot, Event{Type: "service.start_failed", Service: plan.Name, Message: err.Error()})
+			return errorResponse("SERVICE_START_FAILED", fmt.Sprintf("%s: %s", plan.Name, err), "Run workyard logs "+plan.Name+" --tail 200")
 		}
-		st.Services[name] = state
+		st.Services[plan.Name] = state
 		if err := saveState(req.RunRoot, st); err != nil {
 			d.mu.Unlock()
 			return errorResponse("STATE_SAVE_FAILED", err.Error(), "")
 		}
 		d.mu.Unlock()
 
-		healthState := waitInitialHealth(state, startHealthTimeout(svc.Health.Timeout, req.Timeout))
+		healthState := waitInitialHealth(state, startHealthTimeout(plan.Service.Health.Timeout, req.Timeout))
 		appendEvent(req.RunRoot, healthEvent(healthState))
 
 		d.mu.Lock()
@@ -127,14 +140,14 @@ func (d *Daemon) start(req Request) Response {
 			d.mu.Unlock()
 			return errorResponse("STATE_LOAD_FAILED", err.Error(), "")
 		}
-		current := st.Services[name]
+		current := st.Services[plan.Name]
 		if current.Process == state.Process {
 			current.Status = healthState.Status
 			current.Healthy = healthState.Healthy
 			current.PID = healthState.PID
 			current.Process = healthState.Process
 			current.StoppedAt = healthState.StoppedAt
-			st.Services[name] = current
+			st.Services[plan.Name] = current
 		}
 		if err := saveState(req.RunRoot, st); err != nil {
 			d.mu.Unlock()
@@ -144,7 +157,7 @@ func (d *Daemon) start(req Request) Response {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	st, err := loadState(req.RunRoot, loaded.Config.Name, req.RunID, workerName(req.Worker))
+	st, err = loadState(req.RunRoot, loaded.Config.Name, req.RunID, workerName(req.Worker))
 	if err != nil {
 		return errorResponse("STATE_LOAD_FAILED", err.Error(), "")
 	}
@@ -185,7 +198,7 @@ func (d *Daemon) startService(runRoot string, st RunState, name string, svc conf
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = serviceEnv(svc, assigned)
+	cmd.Env = serviceEnvForRun(svc, assigned, sortedStates(st))
 	if err := cmd.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
@@ -391,6 +404,10 @@ func selectStateServices(st RunState, requested []string, all bool) ([]string, e
 }
 
 func serviceEnv(svc config.Service, assigned int) []string {
+	return serviceEnvForRun(svc, assigned, nil)
+}
+
+func serviceEnvForRun(svc config.Service, assigned int, services []ServiceState) []string {
 	env := minimalEnv()
 	for key, value := range svc.Env {
 		env = appendOrReplaceEnv(env, key, value)
@@ -402,8 +419,33 @@ func serviceEnv(svc config.Service, assigned int) []string {
 		}
 		env = appendOrReplaceEnv(env, "WORKYARD_PORT", portValue)
 	}
+	for _, service := range services {
+		if service.Name == "" || service.AssignedPort <= 0 {
+			continue
+		}
+		key := serviceEnvKey(service.Name)
+		portValue := strconv.Itoa(service.AssignedPort)
+		env = appendOrReplaceEnv(env, "WORKYARD_SERVICE_"+key+"_PORT", portValue)
+		env = appendOrReplaceEnv(env, "WORKYARD_SERVICE_"+key+"_URL", "http://127.0.0.1:"+portValue)
+	}
 	env = appendOrReplaceEnv(env, "WORKYARD", "1")
 	return env
+}
+
+func serviceEnvKey(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' {
+			b.WriteRune(r - 'a' + 'A')
+			continue
+		}
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteRune('_')
+	}
+	return b.String()
 }
 
 func minimalEnv() []string {

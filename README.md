@@ -457,9 +457,11 @@ services:
 
 The old `command` service field is not supported. Use `startCommand`.
 
+When services start, Workyard injects the selected service's assigned port through `WORKYARD_PORT` and the configured `port.env` name. It also injects peer service connection values for the whole run: `WORKYARD_SERVICE_<SERVICE>_PORT` and `WORKYARD_SERVICE_<SERVICE>_URL`, where `<SERVICE>` is the uppercased service name with non-alphanumeric characters replaced by `_`. For example, an `api` service can call `analytics` through `WORKYARD_SERVICE_ANALYTICS_URL`, and both values stay correct when two runs of the same project receive different worker ports.
+
 ## Secrets Model
 
-Workyard treats `.env` files as sensitive inputs. By default, sync excludes `.env`, `.env.local`, and `.env.*.local`; set `sync.includeEnvFiles: true` only for fixtures or worker environments where those files are intentionally copied. Workyard never edits `.env` files to resolve port conflicts. Assigned ports are injected into process environments through `WORKYARD_PORT` and the configured `port.env` name.
+Workyard treats `.env` files as sensitive inputs. By default, sync excludes `.env`, `.env.local`, and `.env.*.local`; set `sync.includeEnvFiles: true` only for fixtures or worker environments where those files are intentionally copied. Workyard never edits `.env` files to resolve port conflicts. Assigned ports are injected into process environments instead.
 
 Daemon control stays on a private Unix socket under `~/.workyard/daemon`, remote commands run over SSH, and local commands can start the local daemon in the background with `workyard daemon start`. Stop it with `workyard daemon stop`, and check it with `workyard daemon status`. Logs are read through bounded commands unless `logs --follow` is explicitly requested. Log and inspect output redacts common secret shapes such as `TOKEN=value`, `api_key: value`, bearer tokens, and URL credentials, but redaction is a safety net rather than a reason to print secrets.
 

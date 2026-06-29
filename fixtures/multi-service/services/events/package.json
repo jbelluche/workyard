@@ -1,0 +1,19 @@
+{
+  "name": "@workyard-multi/events",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@elysiajs/cors": "^1.3.3",
+    "@workyard-multi/shared": "workspace:*",
+    "elysia": "^1.3.21"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "bun-types": "^1.3.14",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,123 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f6f7f3;
+  color: #1f2933;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.shell {
+  width: min(960px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 42px 0;
+}
+
+.hero {
+  padding: 24px 0 18px;
+}
+
+.eyebrow,
+.subtle,
+.metrics span,
+.order span,
+.order em {
+  color: #64748b;
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: 44px;
+  line-height: 1;
+}
+
+.subtle {
+  max-width: 620px;
+  margin: 14px 0 0;
+  font-size: 17px;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 24px 0;
+}
+
+.metrics div,
+.order {
+  border: 1px solid #d9dfd0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.metrics div {
+  padding: 16px;
+}
+
+.metrics span,
+.metrics strong {
+  display: block;
+}
+
+.metrics span {
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.metrics strong {
+  font-size: 28px;
+}
+
+.orders {
+  display: grid;
+  gap: 10px;
+}
+
+.order {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 16px;
+}
+
+.order p {
+  margin: 0 0 4px;
+  font-weight: 700;
+}
+
+.order span,
+.order em {
+  font-size: 13px;
+  font-style: normal;
+}
+
+.empty {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid #f2c94c;
+  border-radius: 8px;
+  background: #fff9db;
+}
+
+@media (max-width: 720px) {
+  .metrics,
+  .order {
+    grid-template-columns: 1fr;
+  }
+
+  h1 {
+    font-size: 34px;
+  }
+}

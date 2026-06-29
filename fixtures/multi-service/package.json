@@ -1,0 +1,17 @@
+{
+  "name": "workyard-multi-service-fixture",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/api",
+    "services/events"
+  ],
+  "scripts": {
+    "build:analytics": "scripts/build-analytics-linux-arm64.sh",
+    "check": "bun run --filter '*' typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

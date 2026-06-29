@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -95,7 +96,9 @@ func EnsureArtifact(ctx context.Context, platform Platform, artifactDir, localBi
 	}
 	binary := filepath.Join(dir, platform.ArtifactName())
 	if info, err := os.Stat(binary); err == nil && !info.IsDir() {
-		return binary, nil
+		if repoErr != nil || artifactFresh(repoRoot, binary) {
+			return binary, nil
+		}
 	}
 	if repoErr != nil {
 		return "", fmt.Errorf("artifact %s not found and no Workyard checkout to build from: %v", binary, repoErr)
@@ -120,6 +123,52 @@ func EnsureArtifact(ctx context.Context, platform Platform, artifactDir, localBi
 		return "", fmt.Errorf("go build for %s/%s failed: %w: %s", platform.OS, platform.Arch, err, strings.TrimSpace(stderr.String()))
 	}
 	return binary, nil
+}
+
+func artifactFresh(repoRoot, binary string) bool {
+	info, err := os.Stat(binary)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	builtAt := info.ModTime()
+	for _, rel := range []string{"go.mod", "go.sum"} {
+		if newerThan(filepath.Join(repoRoot, rel), builtAt) {
+			return false
+		}
+	}
+	for _, rel := range []string{"cmd", "internal"} {
+		root := filepath.Join(repoRoot, rel)
+		stale := false
+		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			if filepath.Ext(path) != ".go" {
+				return nil
+			}
+			if newerThan(path, builtAt) {
+				stale = true
+				return fs.SkipAll
+			}
+			return nil
+		}); stale {
+			return false
+		} else if err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func newerThan(path string, cutoff time.Time) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.ModTime().After(cutoff)
 }
 
 // FindRepoRoot walks up from the working directory to the Workyard checkout.

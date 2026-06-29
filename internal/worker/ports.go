@@ -40,7 +40,7 @@ func allocatePort(st RunState, service string, configured int, rng portRange) (i
 	}
 	used := map[int]bool{}
 	for name, svc := range st.Services {
-		if name != service && isRunningStatus(svc.Status) && svc.AssignedPort > 0 {
+		if name != service && reservesPort(svc.Status) && svc.AssignedPort > 0 {
 			used[svc.AssignedPort] = true
 		}
 	}
@@ -67,4 +67,8 @@ func portAvailable(port int) bool {
 
 func isRunningStatus(status string) bool {
 	return status == "starting" || status == "running" || status == "healthy" || status == "unhealthy"
+}
+
+func reservesPort(status string) bool {
+	return status == "preparing" || isRunningStatus(status)
 }

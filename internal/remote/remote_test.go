@@ -1,8 +1,11 @@
 package remote
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildPathsRejectsRemoteRootOutsideWorkyardRuns(t *testing.T) {
@@ -50,6 +53,45 @@ func TestNormalizePlatformMapsLinuxArm64(t *testing.T) {
 	}
 	if platform.OS != "linux" || platform.Arch != "arm64" || platform.ArtifactName() != "workyard-linux-arm64" {
 		t.Fatalf("unexpected platform %#v", platform)
+	}
+}
+
+func TestArtifactFreshTracksWorkyardSourceFiles(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "go.mod"), "module github.com/jackbelluche/workyard\n")
+	mustWrite(t, filepath.Join(root, "go.sum"), "")
+	mustWrite(t, filepath.Join(root, "cmd", "workyard", "main.go"), "package main\n")
+	mustWrite(t, filepath.Join(root, "internal", "worker", "worker.go"), "package worker\n")
+	artifact := filepath.Join(root, "dist", "workyard-linux-arm64")
+	mustWrite(t, artifact, "binary")
+
+	old := time.Now().Add(-2 * time.Hour)
+	newer := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "go.mod"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(root, "go.sum"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(root, "cmd", "workyard", "main.go"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(root, "internal", "worker", "worker.go"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(artifact, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	if !artifactFresh(root, artifact) {
+		t.Fatal("expected artifact to be fresh when it is newer than sources")
+	}
+
+	latest := time.Now()
+	if err := os.Chtimes(filepath.Join(root, "internal", "worker", "worker.go"), latest, latest); err != nil {
+		t.Fatal(err)
+	}
+	if artifactFresh(root, artifact) {
+		t.Fatal("expected artifact to be stale when a source file is newer")
 	}
 }
 
@@ -155,5 +197,15 @@ func TestBuildLocalPathsRejectsRemoteRootOutsideStateDir(t *testing.T) {
 	}
 	if _, err := BuildLocalPaths("/home/jack", "/tmp/custom-state", "/tmp/custom-state/runs", "fixture", "run-1"); err != nil {
 		t.Fatalf("expected remote root under the state dir to be accepted: %v", err)
+	}
+}
+
+func mustWrite(t *testing.T, path string, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -111,3 +111,7 @@ func projectLifecycleEnv() []string {
 func serviceLifecycleEnv(svc config.Service, assigned int) []string {
 	return serviceEnv(svc, assigned)
 }
+
+func serviceLifecycleEnvForRun(svc config.Service, assigned int, st RunState) []string {
+	return serviceEnvForRun(svc, assigned, sortedStates(st))
+}

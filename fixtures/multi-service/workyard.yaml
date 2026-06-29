@@ -1,0 +1,125 @@
+name: workyard-multi-service
+
+sync:
+  exclude:
+    - node_modules
+    - .next
+    - .turbo
+    - .cache
+    - "*.log"
+
+worker:
+  portRange: "4200-4299"
+
+setup:
+  command: scripts/setup.sh
+  timeout: 10m
+
+build:
+  command: scripts/verify-runtime.sh
+  timeout: 30s
+
+services:
+  analytics:
+    path: services/analytics
+    startCommand: ./bin/analytics-linux-arm64
+    port:
+      default: 4103
+      env: PORT
+    env:
+      HOST: 0.0.0.0
+    health:
+      url: http://127.0.0.1:4103/health
+      timeout: 15s
+    watch:
+      paths:
+        - services/analytics
+      include:
+        - "*.go"
+        - "bin/analytics-linux-arm64"
+      action: sync-restart
+      debounce: 750ms
+
+  api:
+    path: services/api
+    startCommand: ../../scripts/run-bun.sh run start
+    port:
+      default: 4100
+      env: PORT
+    env:
+      HOST: 0.0.0.0
+    health:
+      url: http://127.0.0.1:4100/health
+      timeout: 15s
+    watch:
+      paths:
+        - services/api
+        - packages/shared
+      include:
+        - "*.ts"
+        - "package.json"
+      action: sync-restart
+      debounce: 750ms
+
+  customer-ui:
+    path: apps/customer-ui
+    startCommand: ../../scripts/run-bun.sh run dev --hostname 0.0.0.0 --port ${WORKYARD_PORT}
+    port:
+      default: 4110
+      env: PORT
+    health:
+      url: http://127.0.0.1:4110/api/health
+      timeout: 30s
+    watch:
+      paths:
+        - apps/customer-ui
+        - packages/shared
+      include:
+        - "*.ts"
+        - "*.tsx"
+        - "*.css"
+        - "package.json"
+      action: sync-restart
+      debounce: 1s
+
+  events:
+    path: services/events
+    startCommand: ../../scripts/run-bun.sh run start
+    port:
+      default: 4101
+      env: PORT
+    env:
+      HOST: 0.0.0.0
+    health:
+      url: http://127.0.0.1:4101/health
+      timeout: 15s
+    watch:
+      paths:
+        - services/events
+        - packages/shared
+      include:
+        - "*.ts"
+        - "package.json"
+      action: sync-restart
+      debounce: 750ms
+
+  operator-ui:
+    path: apps/operator-ui
+    startCommand: ../../scripts/run-bun.sh run dev --hostname 0.0.0.0 --port ${WORKYARD_PORT}
+    port:
+      default: 4111
+      env: PORT
+    health:
+      url: http://127.0.0.1:4111/api/health
+      timeout: 30s
+    watch:
+      paths:
+        - apps/operator-ui
+        - packages/shared
+      include:
+        - "*.ts"
+        - "*.tsx"
+        - "*.css"
+        - "package.json"
+      action: sync-restart
+      debounce: 1s
