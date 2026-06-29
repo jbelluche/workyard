@@ -1,8 +1,10 @@
 # Workyard
 
-Workyard is an agent-first remote development runner. It syncs a local project to a private worker over SSH, starts configured services through a worker daemon, tracks health and lifecycle events, and exposes a local dashboard for monitoring what is running.
+Workyard is an agent-first remote workspace tool. Its primary workflow is `workyard mirror`: register a local directory, keep it mirrored to a private worker over SSH/Tailscale, then shell or run commands in that remote workspace as if it were a normal clone.
 
-Workyard never infers a target machine: every command names its worker with `--worker`, so a user or agent cannot act on the wrong machine by accident. Use `--worker localhost` for this machine or a registered worker name (shell completion offers both).
+Workyard also includes lower-level service orchestration commands for projects that need a worker daemon, health checks, preview URLs, logs, and lifecycle events. Those commands remain useful, but the mirror workflow is the simplest daily path for "put this repo on a bigger Linux box and work there."
+
+Workyard does not guess where to run. Mirror records store the worker selected during setup, and service/run commands name their worker with `--worker`. Use `--worker localhost` for this machine or a registered worker name (shell completion offers both).
 
 > **Warning**
 > Workyard should only be installed and run on machines you trust. It syncs project files, starts configured commands, manages local/remote processes, and reads bounded logs over SSH.
@@ -40,6 +42,7 @@ The default model is private and local:
 - `ssh`
 - Tailscale installed, running, and connected
 - A worker machine reachable over SSH, usually through Tailscale
+- Optional: `tmux` on the worker for persistent remote shells
 
 Check your local setup with:
 
@@ -86,7 +89,73 @@ The install command detects the worker OS/architecture, uploads `dist/workyard-<
 
 ## Quick Start
 
-Create a config:
+Register a reachable Tailscale/SSH worker:
+
+```sh
+workyard workers discover
+workyard workers add jack-r5-16gb --user jack
+```
+
+Create a mirror for the current directory:
+
+```sh
+workyard mirror setup
+```
+
+The wizard asks for the local directory, worker, remote destination, exclude presets, and a final confirmation. The default remote destination is `~/workspace/<directory-name>`.
+
+Sync once and open a remote shell:
+
+```sh
+workyard mirror --once
+workyard mirror shell --auto
+```
+
+Use a persistent tmux shell so the remote session survives disconnects:
+
+```sh
+workyard mirror shell --auto --tmux
+```
+
+Run one command in the remote mirror:
+
+```sh
+workyard mirror exec --auto -- git status
+workyard mirror exec --auto -- npm test
+```
+
+Run continuous mirroring in the current terminal:
+
+```sh
+workyard mirror
+```
+
+Or run mirroring in the background:
+
+```sh
+workyard mirror start
+workyard mirror status
+workyard mirror stop
+```
+
+Useful mirror maintenance commands:
+
+```sh
+workyard mirror list
+workyard mirror doctor --fix
+workyard mirror rename <id> <new-name>
+workyard mirror tmux list
+workyard mirror tmux kill <id>
+workyard mirror delete <id>
+```
+
+Each mirror has a stable short ID. Names are labels and may collide; when a name is ambiguous, Workyard asks for an ID.
+
+## Service Orchestration
+
+Use service orchestration when you want Workyard to manage processes, health checks, preview URLs, logs, and lifecycle events through the worker daemon.
+
+Create a service config:
 
 ```sh
 workyard init
@@ -119,7 +188,7 @@ workyard deploy /path/to/project --worker user@worker-host --fresh
 
 `deploy` runs `doctor`, `sync`, `setup`, `build`, relaunches services, waits for healthy services, and prints the active URLs. Add `--install` when you want it to install or upgrade the worker binary first; deploy restarts the worker daemon after installing so the new binary is active.
 
-You can still run individual lower-level commands:
+You can still run individual lower-level service commands:
 
 ```sh
 workyard --worker user@worker-host sync
@@ -128,7 +197,7 @@ workyard --worker user@worker-host build
 workyard --worker user@worker-host start web
 ```
 
-Inspect status and URLs:
+Inspect service status and URLs:
 
 ```sh
 workyard --worker user@worker-host status
@@ -421,9 +490,9 @@ Supported watch actions:
 
 Watch mode uses filesystem events when available and falls back to polling with `--poll-interval`.
 
-## Mirror Mode
+## Mirror Workflow
 
-Mirror mode keeps registered local directories reflected on workers without requiring a `workyard.yaml` service config. It is useful when you want to SSH into a Tailscale-connected device and find a normal workspace directory with your latest local edits.
+Mirror keeps registered local directories reflected on workers without requiring a `workyard.yaml` service config. It is useful when you want to SSH into a Tailscale-connected device and find a normal workspace directory with your latest local edits.
 
 Configure a mirror with the wizard:
 
@@ -459,13 +528,56 @@ workyard mirror status
 workyard mirror stop
 ```
 
-List, pause, resume, doctor, and delete configured mirrors:
+Open a remote shell in a mirror:
+
+```sh
+workyard mirror shell <name-or-id>
+```
+
+If the destination is missing or empty, let Workyard sync once before opening the shell:
+
+```sh
+workyard mirror shell <name-or-id> --auto
+```
+
+Use tmux for persistent shells:
+
+```sh
+workyard mirror shell <name-or-id> --auto --tmux
+```
+
+Default tmux sessions are named from the immutable mirror ID:
+
+```text
+workyard-<id>
+```
+
+Renaming a mirror changes only its human label; it does not change the ID, the marker owner, or the default tmux session. List and kill mirror tmux sessions with:
+
+```sh
+workyard mirror tmux list
+workyard mirror tmux list <name-or-id>
+workyard mirror tmux kill <name-or-id>
+workyard mirror tmux kill <name-or-id> --session <custom-session>
+```
+
+Run commands directly in the remote mirror directory:
+
+```sh
+workyard mirror exec <name-or-id> -- git status
+workyard mirror exec <name-or-id> --auto -- npm test
+workyard mirror exec --auto -- go test ./...
+```
+
+List, pause, resume, rename, doctor, and delete configured mirrors:
 
 ```sh
 workyard mirror list
 workyard mirror pause <name-or-id>
 workyard mirror resume <name-or-id>
+workyard mirror rename <name-or-id> <new-name>
 workyard mirror doctor <name-or-id>
+workyard mirror doctor <name-or-id> --fix
 workyard mirror delete <name-or-id>
 ```
 
@@ -480,7 +592,7 @@ workyard mirror setup --preset node --preset python
 workyard mirror setup --preset none
 ```
 
-`workyard mirror doctor` checks local source readability, local and remote `rsync`, SSH connectivity, destination safety and marker ownership, and stored presets.
+`workyard mirror doctor` checks local source readability, local and remote `rsync`, SSH connectivity, destination safety and marker ownership, and stored presets. `--fix` applies only safe repairs: removing stale local mirror pid files, creating missing destinations, and securing destinations that are empty or already marked as the same mirror. It skips non-empty unmarked paths, symlinks, files, and mismatched markers.
 
 Deleting a mirror only removes the local registry record by default. To remove the remote files too, pass `--delete-remote`; Workyard will refuse unless the destination contains a matching `.workyard-mirror.json` marker written by mirror sync:
 
@@ -538,6 +650,35 @@ curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/ins
 Set `WORKYARD_REPO`, `WORKYARD_VERSION`, or `WORKYARD_INSTALL_DIR` before running the script when installing from a non-default release location. Homebrew formulas can reference the tarball URL and matching SHA-256 from `checksums.txt`.
 
 ## Command Reference
+
+Mirror commands:
+
+```sh
+workyard mirror setup
+workyard mirror
+workyard mirror --once
+workyard mirror --verbose
+workyard mirror start
+workyard mirror status
+workyard mirror stop
+workyard mirror list
+workyard mirror shell <id>
+workyard mirror shell <id> --auto
+workyard mirror shell <id> --auto --tmux
+workyard mirror exec <id> -- <command> [args...]
+workyard mirror exec <id> --auto -- <command> [args...]
+workyard mirror doctor <id>
+workyard mirror doctor <id> --fix
+workyard mirror rename <id> <new-name>
+workyard mirror pause <id>
+workyard mirror resume <id>
+workyard mirror tmux list
+workyard mirror tmux list <id>
+workyard mirror tmux kill <id>
+workyard mirror tmux kill <id> --session <custom-session>
+workyard mirror delete <id>
+workyard mirror delete <id> --delete-remote
+```
 
 Project commands:
 
@@ -608,13 +749,15 @@ workyard version
 workyard completion zsh
 ```
 
-Most commands support:
+Service/run commands commonly support:
 
 - `--worker user@worker-host`
 - `--run <run-id>`
 - `--project <path>`
 - `--json`
 - `--verbose`
+
+Mirror commands use the worker stored in each mirror record after `workyard mirror setup`; use `workyard mirror list` to see the mapping.
 
 ## Security Notes
 
@@ -673,7 +816,7 @@ workyard --project fixtures/health-server --worker user@worker-host stop
 
 ## Status
 
-Workyard is early and intentionally local-first. It is useful today for private remote development workflows, synthetic service fixtures, and agent-friendly inspection of running services.
+Workyard is early and intentionally local-first. It is useful today for private mirrored remote workspaces, synthetic service fixtures, and agent-friendly inspection of running services.
 
 ## License
 
