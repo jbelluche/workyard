@@ -46,6 +46,7 @@ type DestinationCheck struct {
 }
 
 type Marker struct {
+	ID              string    `json:"id,omitempty"`
 	Name            string    `json:"name"`
 	LocalRoot       string    `json:"localRoot"`
 	Worker          string    `json:"worker"`
@@ -58,10 +59,12 @@ type Marker struct {
 type SyncOptions struct {
 	Version string
 	DryRun  bool
+	Verbose bool
 }
 
 type SyncResult struct {
 	OK               bool      `json:"ok"`
+	ID               string    `json:"id"`
 	Name             string    `json:"name"`
 	Worker           string    `json:"worker"`
 	LocalRoot        string    `json:"localRoot"`
@@ -72,6 +75,12 @@ type SyncResult struct {
 	FinishedAt       time.Time `json:"finishedAt"`
 	FilesTransferred int       `json:"filesTransferred"`
 	BytesTransferred int64     `json:"bytesTransferred"`
+	Changed          []Change  `json:"changed,omitempty"`
+}
+
+type Change struct {
+	Path string `json:"path"`
+	Code string `json:"code"`
 }
 
 func CheckDestination(ctx context.Context, profile Profile) (DestinationCheck, error) {
@@ -104,7 +113,7 @@ func CheckDestination(ctx context.Context, profile Profile) (DestinationCheck, e
 			return DestinationCheck{}, err
 		}
 		check.Marker = &marker
-		check.OK = marker.Name == profile.Name && marker.LocalRoot == profile.LocalRoot
+		check.OK = MarkerMatches(marker, profile)
 		if !check.OK {
 			check.NonEmptyReason = "destination contains a marker for a different mirror"
 		}
@@ -139,7 +148,7 @@ func Sync(ctx context.Context, profile Profile, opts SyncOptions) (SyncResult, e
 	}
 	defer os.Remove(excludeFile)
 
-	args := []string{"-az", "--stats", "--exclude-from", excludeFile}
+	args := []string{"-az", "--stats", "--itemize-changes", "--exclude-from", excludeFile}
 	if profile.Delete {
 		args = append(args, "--delete")
 	}
@@ -162,6 +171,7 @@ func Sync(ctx context.Context, profile Profile, opts SyncOptions) (SyncResult, e
 	stats := parseStats(stdout.String())
 	return SyncResult{
 		OK:               true,
+		ID:               profile.ID,
 		Name:             profile.Name,
 		Worker:           profile.Worker,
 		LocalRoot:        profile.LocalRoot,
@@ -172,6 +182,7 @@ func Sync(ctx context.Context, profile Profile, opts SyncOptions) (SyncResult, e
 		FinishedAt:       time.Now().UTC(),
 		FilesTransferred: stats.files,
 		BytesTransferred: stats.bytes,
+		Changed:          parseChanges(stdout.String()),
 	}, nil
 }
 
@@ -179,6 +190,9 @@ func WriteMarker(ctx context.Context, profile Profile, resolvedPath, version str
 	now := time.Now().UTC()
 	existing, err := ReadMarker(ctx, profile.Worker, resolvedPath)
 	if err == nil && !existing.CreatedAt.IsZero() {
+		existing.ID = profile.ID
+		existing.Name = profile.Name
+		existing.Worker = profile.Worker
 		existing.UpdatedAt = now
 		existing.WorkyardVersion = version
 		existing.LocalRoot = profile.LocalRoot
@@ -189,6 +203,7 @@ func WriteMarker(ctx context.Context, profile Profile, resolvedPath, version str
 		return err
 	}
 	marker := Marker{
+		ID:              profile.ID,
 		Name:            profile.Name,
 		LocalRoot:       profile.LocalRoot,
 		Worker:          profile.Worker,
@@ -228,7 +243,7 @@ func DeleteRemote(ctx context.Context, profile Profile) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("refusing to delete remote path without a Workyard mirror marker: %w", err)
 	}
-	if marker.Name != profile.Name || marker.LocalRoot != profile.LocalRoot {
+	if !MarkerMatches(marker, profile) {
 		return "", fmt.Errorf("refusing to delete remote path; marker belongs to mirror %q from %s", marker.Name, marker.LocalRoot)
 	}
 	script := strings.Join([]string{
@@ -243,6 +258,13 @@ func DeleteRemote(ctx context.Context, profile Profile) (string, error) {
 		return "", err
 	}
 	return resolved, nil
+}
+
+func MarkerMatches(marker Marker, profile Profile) bool {
+	if marker.ID != "" && profile.ID != "" {
+		return marker.ID == profile.ID
+	}
+	return marker.Name == profile.Name && marker.LocalRoot == profile.LocalRoot
 }
 
 func ResolveRemotePath(home, value string) string {
@@ -310,6 +332,7 @@ func writeExcludeFile(profile Profile) (string, error) {
 	}
 	seen := map[string]bool{}
 	items := append([]string{}, DefaultExcludes...)
+	items = append(items, PresetExcludes(profile.Presets)...)
 	if !profile.IncludeGit {
 		items = append(items, ".git")
 	}
@@ -349,6 +372,27 @@ func parseStats(out string) rsyncStats {
 		}
 	}
 	return stats
+}
+
+func parseChanges(out string) []Change {
+	var changes []Change
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		idx := strings.IndexFunc(line, func(r rune) bool { return r == ' ' || r == '\t' })
+		if idx < 2 {
+			continue
+		}
+		code := line[:idx]
+		if !strings.ContainsRune("><ch.*", rune(code[0])) || !strings.ContainsRune("fdLDS.", rune(code[1])) {
+			continue
+		}
+		pathValue := strings.TrimSpace(line[idx+1:])
+		if pathValue == "" || strings.HasPrefix(pathValue, "Number of ") || strings.HasPrefix(pathValue, "Total ") {
+			continue
+		}
+		changes = append(changes, Change{Code: code, Path: pathValue})
+	}
+	return changes
 }
 
 func parseIntAfterColon(line string) int {

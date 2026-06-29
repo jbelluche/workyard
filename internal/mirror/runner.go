@@ -34,6 +34,7 @@ type State struct {
 }
 
 type RuntimeStatus struct {
+	ID         string    `json:"id"`
 	Name       string    `json:"name"`
 	Worker     string    `json:"worker"`
 	LocalRoot  string    `json:"localRoot"`
@@ -98,7 +99,7 @@ func (s *StateStore) Set(profile Profile, status string, synced time.Time, syncE
 	state.UpdatedAt = now
 	found := false
 	for i := range state.Mirrors {
-		if state.Mirrors[i].Name != profile.Name {
+		if state.Mirrors[i].ID != profile.ID {
 			continue
 		}
 		state.Mirrors[i] = runtimeStatus(profile, status, synced, syncErr)
@@ -144,6 +145,7 @@ func (s *StateStore) write(state State) error {
 
 func runtimeStatus(profile Profile, status string, synced time.Time, syncErr error) RuntimeStatus {
 	item := RuntimeStatus{
+		ID:         profile.ID,
 		Name:       profile.Name,
 		Worker:     profile.Worker,
 		LocalRoot:  profile.LocalRoot,

@@ -1,11 +1,14 @@
 package mirror
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -17,7 +20,10 @@ import (
 
 const FileName = "mirrors.yaml"
 
+var idRE = regexp.MustCompile(`^[a-z0-9]{6,8}$`)
+
 type Profile struct {
+	ID            string    `yaml:"id" json:"id"`
 	Name          string    `yaml:"name" json:"name"`
 	Enabled       bool      `yaml:"enabled" json:"enabled"`
 	LocalRoot     string    `yaml:"localRoot" json:"localRoot"`
@@ -26,6 +32,7 @@ type Profile struct {
 	Delete        bool      `yaml:"delete" json:"delete"`
 	IncludeGit    bool      `yaml:"includeGit" json:"includeGit"`
 	AllowNonEmpty bool      `yaml:"allowNonEmpty,omitempty" json:"allowNonEmpty,omitempty"`
+	Presets       []string  `yaml:"presets,omitempty" json:"presets,omitempty"`
 	Exclude       []string  `yaml:"exclude,omitempty" json:"exclude,omitempty"`
 	RegisteredAt  time.Time `yaml:"registeredAt" json:"registeredAt"`
 	UpdatedAt     time.Time `yaml:"updatedAt" json:"updatedAt"`
@@ -37,6 +44,15 @@ type File struct {
 
 type Store struct {
 	path string
+}
+
+type AmbiguousRefError struct {
+	Ref string
+	IDs []string
+}
+
+func (e AmbiguousRefError) Error() string {
+	return fmt.Sprintf("mirror name %q is ambiguous", e.Ref)
 }
 
 func DefaultPath(stateDir string) string {
@@ -65,26 +81,58 @@ func (s Store) List() ([]Profile, error) {
 	return out, nil
 }
 
-func (s Store) Get(name string) (Profile, bool, error) {
-	name = strings.TrimSpace(name)
+func (s Store) Get(ref string) (Profile, bool, error) {
+	ref = strings.TrimSpace(ref)
 	profiles, err := s.List()
 	if err != nil {
 		return Profile{}, false, err
 	}
+	return Resolve(profiles, ref)
+}
+
+func Resolve(profiles []Profile, ref string) (Profile, bool, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return Profile{}, false, fmt.Errorf("mirror reference is required")
+	}
 	for _, profile := range profiles {
-		if profile.Name == name {
+		if profile.ID == ref {
 			return profile, true, nil
 		}
+	}
+	var matches []Profile
+	for _, profile := range profiles {
+		if profile.Name == ref {
+			matches = append(matches, profile)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	if len(matches) > 1 {
+		ids := make([]string, 0, len(matches))
+		for _, profile := range matches {
+			ids = append(ids, profile.ID)
+		}
+		sort.Strings(ids)
+		return Profile{}, false, AmbiguousRefError{Ref: ref, IDs: ids}
 	}
 	return Profile{}, false, nil
 }
 
 func (s Store) Upsert(profile Profile) (Profile, error) {
-	profile, err := Normalize(profile)
+	file, err := s.load()
 	if err != nil {
 		return Profile{}, err
 	}
-	file, err := s.load()
+	if strings.TrimSpace(profile.ID) == "" {
+		id, err := newUniqueID(file.Mirrors)
+		if err != nil {
+			return Profile{}, err
+		}
+		profile.ID = id
+	}
+	profile, err = Normalize(profile)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -92,7 +140,7 @@ func (s Store) Upsert(profile Profile) (Profile, error) {
 	profile.UpdatedAt = now
 	found := false
 	for i, existing := range file.Mirrors {
-		if existing.Name != profile.Name {
+		if existing.ID != profile.ID {
 			continue
 		}
 		if existing.RegisteredAt.IsZero() {
@@ -115,20 +163,45 @@ func (s Store) Upsert(profile Profile) (Profile, error) {
 	return profile, nil
 }
 
-func (s Store) Delete(name string) (Profile, bool, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || strings.ContainsAny(name, "\x00\r\n/\\") {
-		return Profile{}, false, fmt.Errorf("mirror name is required")
+func (s Store) SetEnabled(ref string, enabled bool) (Profile, bool, error) {
+	file, err := s.load()
+	if err != nil {
+		return Profile{}, false, err
+	}
+	profile, ok, err := Resolve(file.Mirrors, ref)
+	if err != nil || !ok {
+		return Profile{}, ok, err
+	}
+	now := time.Now().UTC()
+	for i := range file.Mirrors {
+		if file.Mirrors[i].ID == profile.ID {
+			file.Mirrors[i].Enabled = enabled
+			file.Mirrors[i].UpdatedAt = now
+			profile = file.Mirrors[i]
+			break
+		}
+	}
+	return profile, true, s.save(file)
+}
+
+func (s Store) Delete(ref string) (Profile, bool, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.ContainsAny(ref, "\x00\r\n/\\") {
+		return Profile{}, false, fmt.Errorf("mirror reference is required")
 	}
 	file, err := s.load()
 	if err != nil {
 		return Profile{}, false, err
 	}
+	target, ok, err := Resolve(file.Mirrors, ref)
+	if err != nil || !ok {
+		return Profile{}, ok, err
+	}
 	next := file.Mirrors[:0]
 	var removed Profile
 	found := false
 	for _, profile := range file.Mirrors {
-		if profile.Name == name {
+		if profile.ID == target.ID {
 			removed = profile
 			found = true
 			continue
@@ -157,12 +230,26 @@ func (s Store) load() (File, error) {
 	if err := yaml.Unmarshal(data, &file); err != nil {
 		return File{}, err
 	}
+	changed := false
 	for i := range file.Mirrors {
+		if strings.TrimSpace(file.Mirrors[i].ID) == "" {
+			id, err := newUniqueID(file.Mirrors)
+			if err != nil {
+				return File{}, err
+			}
+			file.Mirrors[i].ID = id
+			changed = true
+		}
 		profile, err := Normalize(file.Mirrors[i])
 		if err != nil {
 			return File{}, fmt.Errorf("invalid mirror entry %d: %w", i, err)
 		}
 		file.Mirrors[i] = profile
+	}
+	if changed {
+		if err := s.save(file); err != nil {
+			return File{}, err
+		}
 	}
 	return file, nil
 }
@@ -206,6 +293,12 @@ func (s Store) save(file File) error {
 }
 
 func Normalize(profile Profile) (Profile, error) {
+	id := strings.TrimSpace(profile.ID)
+	if id != "" {
+		if err := ValidateID(id); err != nil {
+			return Profile{}, err
+		}
+	}
 	name, err := ValidateName(profile.Name)
 	if err != nil {
 		return Profile{}, err
@@ -221,10 +314,16 @@ func Normalize(profile Profile) (Profile, error) {
 	if err := ValidateRemotePath(remotePath); err != nil {
 		return Profile{}, err
 	}
+	presets, err := NormalizePresets(profile.Presets)
+	if err != nil {
+		return Profile{}, err
+	}
+	profile.ID = id
 	profile.Name = name
 	profile.LocalRoot = localRoot
 	profile.Worker = strings.TrimSpace(profile.Worker)
 	profile.RemotePath = remotePath
+	profile.Presets = presets
 	if !profile.Enabled {
 		// Existing zero-valued profiles from manual edits should remain disabled,
 		// but new profiles are created enabled by the CLI before Normalize.
@@ -244,6 +343,23 @@ func Normalize(profile Profile) (Profile, error) {
 		}
 	}
 	return profile, nil
+}
+
+func NormalizePresets(names []string) ([]string, error) {
+	if err := ValidatePresets(names); err != nil {
+		return nil, err
+	}
+	return uniqueSorted(names), nil
+}
+
+func ValidateID(id string) error {
+	if id == "" {
+		return fmt.Errorf("mirror id is required")
+	}
+	if !idRE.MatchString(id) {
+		return fmt.Errorf("mirror id %q must be 6-8 lowercase letters or digits", id)
+	}
+	return nil
 }
 
 func ValidateName(name string) (string, error) {
@@ -308,7 +424,12 @@ func ValidateRemotePath(value string) error {
 }
 
 func sortProfiles(profiles []Profile) {
-	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Name < profiles[j].Name })
+	sort.Slice(profiles, func(i, j int) bool {
+		if profiles[i].Name != profiles[j].Name {
+			return profiles[i].Name < profiles[j].Name
+		}
+		return profiles[i].ID < profiles[j].ID
+	})
 }
 
 func MarshalForDisplay(profile Profile) map[string]any {
@@ -316,4 +437,39 @@ func MarshalForDisplay(profile Profile) map[string]any {
 	out := map[string]any{}
 	_ = json.Unmarshal(data, &out)
 	return out
+}
+
+const idAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+func newUniqueID(existing []Profile) (string, error) {
+	seen := map[string]bool{}
+	for _, profile := range existing {
+		if profile.ID != "" {
+			seen[profile.ID] = true
+		}
+	}
+	for attempts := 0; attempts < 100; attempts++ {
+		id, err := randomID(7)
+		if err != nil {
+			return "", err
+		}
+		if !seen[id] {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("could not allocate a unique mirror id")
+}
+
+func randomID(length int) (string, error) {
+	var b strings.Builder
+	b.Grow(length)
+	max := big.NewInt(int64(len(idAlphabet)))
+	for i := 0; i < length; i++ {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", err
+		}
+		b.WriteByte(idAlphabet[n.Int64()])
+	}
+	return b.String(), nil
 }

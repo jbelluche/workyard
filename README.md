@@ -436,6 +436,7 @@ The wizard asks for:
 - Local directory, defaulting to the current directory.
 - Registered worker.
 - Remote destination, defaulting to `~/workspace/<directory-name>`.
+- Exclude presets, auto-detected by default from repository files.
 - Confirmation before writing the local mirror registry.
 
 Run all enabled mirrors in the current terminal:
@@ -444,7 +445,13 @@ Run all enabled mirrors in the current terminal:
 workyard mirror
 ```
 
-Press `Ctrl-C` to stop foreground mirroring. Start and stop background mirroring with:
+Foreground mirroring prints each sync:
+
+```text
+synced workyard to jack-r5-16gb:/home/jack/workspace/workyard
+```
+
+Pass `--verbose` to include the itemized changed paths and transferred size. Press `Ctrl-C` to stop foreground mirroring. Start and stop background mirroring with:
 
 ```sh
 workyard mirror start
@@ -452,14 +459,28 @@ workyard mirror status
 workyard mirror stop
 ```
 
-List and delete configured mirrors:
+List, pause, resume, doctor, and delete configured mirrors:
 
 ```sh
 workyard mirror list
-workyard mirror delete <name>
+workyard mirror pause <name-or-id>
+workyard mirror resume <name-or-id>
+workyard mirror doctor <name-or-id>
+workyard mirror delete <name-or-id>
 ```
 
+Each mirror has a stable short ID shown in `mirror list`. Commands accept a name when exactly one mirror has that name; if several mirrors share a name, Workyard asks you to use one of the IDs.
+
 `mirror setup` requires the remote destination to be missing, empty, or already marked as the same Workyard mirror. Use `--force` only when you intentionally want to mirror into a non-empty directory. Mirror syncs use default excludes such as `node_modules`, build outputs, logs, and `.env` files; `.git` is included by default so the remote workspace behaves like a clone.
+
+Mirror setup uses `--preset auto` by default. Auto detection looks for common repository files such as `package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `pom.xml`, `*.csproj`, and `Gemfile`, then adds generated/cache excludes for the detected ecosystems. Override it with explicit presets or disable it:
+
+```sh
+workyard mirror setup --preset node --preset python
+workyard mirror setup --preset none
+```
+
+`workyard mirror doctor` checks local source readability, local and remote `rsync`, SSH connectivity, destination safety and marker ownership, and stored presets.
 
 Deleting a mirror only removes the local registry record by default. To remove the remote files too, pass `--delete-remote`; Workyard will refuse unless the destination contains a matching `.workyard-mirror.json` marker written by mirror sync:
 

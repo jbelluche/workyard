@@ -1699,7 +1699,7 @@ func mirrorCommand(opts *options) *cobra.Command {
 	}
 	root.Flags().BoolVar(&once, "once", false, "sync enabled mirrors once and exit")
 	root.Flags().DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "fallback polling interval")
-	root.AddCommand(mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorDeleteCommand(opts))
+	root.AddCommand(mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorDoctorCommand(opts), mirrorDeleteCommand(opts))
 	return root
 }
 
@@ -1711,6 +1711,7 @@ func mirrorSetupCommand(opts *options) *cobra.Command {
 	var yes bool
 	var includeGit bool
 	var noDelete bool
+	var presets []string
 	includeGit = true
 	cmd := &cobra.Command{
 		Use:   "setup",
@@ -1732,6 +1733,10 @@ func mirrorSetupCommand(opts *options) *cobra.Command {
 			if name == "" {
 				name = mirror.DefaultName(localRootAbs)
 			}
+			resolvedPresets, err := mirror.ResolvePresetSelection(localRootAbs, presets)
+			if err != nil {
+				return output.NewError("MIRROR_PRESET_INVALID", err.Error(), "")
+			}
 			selectedWorker := opts.worker
 			if selectedWorker == "" {
 				selectedWorker, err = promptMirrorWorker(cmd.OutOrStdout(), reader, opts.stateDir)
@@ -1751,6 +1756,7 @@ func mirrorSetupCommand(opts *options) *cobra.Command {
 				Delete:        !noDelete,
 				IncludeGit:    includeGit,
 				AllowNonEmpty: force,
+				Presets:       resolvedPresets,
 			}
 			profile, err = mirror.Normalize(profile)
 			if err != nil {
@@ -1782,7 +1788,7 @@ func mirrorSetupCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "path": store.Path(), "mirror": stored, "destination": check})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "configured mirror %s\n", stored.Name)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "configured mirror %s (%s)\n", stored.Name, stored.ID)
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "registry: %s\n", store.Path())
 			return nil
 		},
@@ -1794,6 +1800,7 @@ func mirrorSetupCommand(opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&yes, "yes", false, "accept setup confirmation prompts")
 	cmd.Flags().BoolVar(&includeGit, "include-git", true, "include the .git directory in mirror syncs")
 	cmd.Flags().BoolVar(&noDelete, "no-delete", false, "do not delete remote files removed locally")
+	cmd.Flags().StringSliceVar(&presets, "preset", []string{"auto"}, "exclude preset: auto, none, or one of "+strings.Join(mirror.PresetNames(), ", "))
 	return cmd
 }
 
@@ -1812,9 +1819,9 @@ func mirrorListCommand(opts *options) *cobra.Command {
 			}
 			rows := make([][]string, 0, len(profiles))
 			for _, profile := range profiles {
-				rows = append(rows, []string{profile.Name, fmt.Sprint(profile.Enabled), profile.Worker, profile.LocalRoot, profile.RemotePath, formatTime(profile.UpdatedAt)})
+				rows = append(rows, []string{profile.ID, profile.Name, fmt.Sprint(profile.Enabled), profile.Worker, strings.Join(profile.Presets, ","), profile.LocalRoot, profile.RemotePath, formatTime(profile.UpdatedAt)})
 			}
-			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "ENABLED", "WORKER", "LOCAL", "REMOTE", "UPDATED"}, rows)
+			return output.WriteTable(cmd.OutOrStdout(), []string{"ID", "NAME", "ENABLED", "WORKER", "PRESETS", "LOCAL", "REMOTE", "UPDATED"}, rows)
 		},
 	}
 }
@@ -1878,8 +1885,9 @@ func mirrorStopCommand(opts *options) *cobra.Command {
 
 func mirrorStatusCommand(opts *options) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status",
+		Use:   "status [name-or-id]",
 		Short: "Show background mirror status and last sync results",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pidPath := mirror.DefaultPIDPath(opts.stateDir)
 			pid, running := readRunningPID(pidPath)
@@ -1893,6 +1901,16 @@ func mirrorStatusCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return output.NewError("MIRROR_REGISTRY_READ_FAILED", err.Error(), "")
 			}
+			if len(args) == 1 {
+				profile, ok, err := mirror.Resolve(profiles, args[0])
+				if err != nil {
+					return mirrorRefCommandError(err)
+				}
+				if !ok {
+					return output.NewError("MIRROR_NOT_FOUND", fmt.Sprintf("mirror %q was not found", args[0]), "Run workyard mirror list")
+				}
+				profiles = []mirror.Profile{profile}
+			}
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": running, "pid": pid, "pidPath": pidPath, "statePath": mirror.DefaultStatePath(opts.stateDir), "state": state, "mirrors": profiles})
 			}
@@ -1901,13 +1919,13 @@ func mirrorStatusCommand(opts *options) *cobra.Command {
 			} else {
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "mirror stopped")
 			}
-			statusByName := map[string]mirror.RuntimeStatus{}
+			statusByID := map[string]mirror.RuntimeStatus{}
 			for _, item := range state.Mirrors {
-				statusByName[item.Name] = item
+				statusByID[item.ID] = item
 			}
 			rows := make([][]string, 0, len(profiles))
 			for _, profile := range profiles {
-				status := statusByName[profile.Name]
+				status := statusByID[profile.ID]
 				stateValue := status.State
 				if stateValue == "" {
 					stateValue = "-"
@@ -1916,11 +1934,97 @@ func mirrorStatusCommand(opts *options) *cobra.Command {
 				if lastErr == "" {
 					lastErr = "-"
 				}
-				rows = append(rows, []string{profile.Name, profile.Worker, stateValue, formatTime(status.LastSync), lastErr})
+				rows = append(rows, []string{profile.ID, profile.Name, profile.Worker, strings.Join(profile.Presets, ","), stateValue, formatTime(status.LastSync), lastErr})
 			}
-			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "WORKER", "STATE", "LAST SYNC", "LAST ERROR"}, rows)
+			return output.WriteTable(cmd.OutOrStdout(), []string{"ID", "NAME", "WORKER", "PRESETS", "STATE", "LAST SYNC", "LAST ERROR"}, rows)
 		},
 	}
+}
+
+func mirrorPauseCommand(opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "pause <name-or-id>",
+		Short: "Disable a configured mirror",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return mirrorSetEnabled(cmd, opts, args[0], false)
+		},
+	}
+}
+
+func mirrorResumeCommand(opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume <name-or-id>",
+		Short: "Enable a configured mirror",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return mirrorSetEnabled(cmd, opts, args[0], true)
+		},
+	}
+}
+
+func mirrorDoctorCommand(opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor [name-or-id]",
+		Short: "Check mirror configuration, connectivity, and destination safety",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store := mirror.NewStore(mirror.DefaultPath(opts.stateDir))
+			profiles, err := store.List()
+			if err != nil {
+				return output.NewError("MIRROR_REGISTRY_READ_FAILED", err.Error(), "")
+			}
+			if len(profiles) == 0 {
+				return output.NewError("MIRROR_NONE_CONFIGURED", "no mirrors are configured", "Run workyard mirror setup")
+			}
+			if len(args) == 1 {
+				profile, ok, err := mirror.Resolve(profiles, args[0])
+				if err != nil {
+					return mirrorRefCommandError(err)
+				}
+				if !ok {
+					return output.NewError("MIRROR_NOT_FOUND", fmt.Sprintf("mirror %q was not found", args[0]), "Run workyard mirror list")
+				}
+				profiles = []mirror.Profile{profile}
+			}
+			profiles, err = resolveMirrorProfiles(opts.stateDir, profiles)
+			if err != nil {
+				return output.NewError("MIRROR_WORKER_INVALID", err.Error(), "Run workyard workers list")
+			}
+			report := mirror.Doctor(cmd.Context(), profiles)
+			if opts.json {
+				if err := output.WriteJSON(cmd.OutOrStdout(), report); err != nil {
+					return err
+				}
+			} else {
+				printMirrorDoctorReport(cmd.OutOrStdout(), report)
+			}
+			if !report.OK {
+				return printedError{err: errors.New("mirror doctor found required check failures"), exitCode: 1}
+			}
+			return nil
+		},
+	}
+}
+
+func mirrorSetEnabled(cmd *cobra.Command, opts *options, ref string, enabled bool) error {
+	store := mirror.NewStore(mirror.DefaultPath(opts.stateDir))
+	profile, ok, err := store.SetEnabled(ref, enabled)
+	if err != nil {
+		return mirrorRefCommandError(err)
+	}
+	if !ok {
+		return output.NewError("MIRROR_NOT_FOUND", fmt.Sprintf("mirror %q was not found", ref), "Run workyard mirror list")
+	}
+	if opts.json {
+		return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "mirror": profile})
+	}
+	action := "resumed"
+	if !enabled {
+		action = "paused"
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s mirror %s (%s)\n", action, profile.Name, profile.ID)
+	return nil
 }
 
 func mirrorDeleteCommand(opts *options) *cobra.Command {
@@ -1928,7 +2032,7 @@ func mirrorDeleteCommand(opts *options) *cobra.Command {
 	var keepRemote bool
 	var yes bool
 	cmd := &cobra.Command{
-		Use:     "delete <name>",
+		Use:     "delete <name-or-id>",
 		Aliases: []string{"remove"},
 		Short:   "Delete a mirror registry record",
 		Args:    cobra.ExactArgs(1),
@@ -1939,7 +2043,7 @@ func mirrorDeleteCommand(opts *options) *cobra.Command {
 			store := mirror.NewStore(mirror.DefaultPath(opts.stateDir))
 			profile, ok, err := store.Get(args[0])
 			if err != nil {
-				return output.NewError("MIRROR_REGISTRY_READ_FAILED", err.Error(), "")
+				return mirrorRefCommandError(err)
 			}
 			if !ok {
 				return output.NewError("MIRROR_NOT_FOUND", fmt.Sprintf("mirror %q was not found", args[0]), "Run workyard mirror list")
@@ -1949,7 +2053,7 @@ func mirrorDeleteCommand(opts *options) *cobra.Command {
 				if !yes {
 					reader := bufio.NewReader(cmd.InOrStdin())
 					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "This will delete remote files at %s:%s\n", profile.Worker, profile.RemotePath)
-					if got := promptLine(cmd.OutOrStdout(), reader, "Type mirror name to confirm remote deletion", ""); got != profile.Name {
+					if got := promptLine(cmd.OutOrStdout(), reader, "Type mirror id to confirm remote deletion", ""); got != profile.ID {
 						return output.NewError("MIRROR_DELETE_CANCELLED", "mirror delete cancelled", "")
 					}
 				}
@@ -1962,14 +2066,14 @@ func mirrorDeleteCommand(opts *options) *cobra.Command {
 					return output.NewError("MIRROR_REMOTE_DELETE_FAILED", err.Error(), "Remote deletion requires a matching .workyard-mirror.json marker")
 				}
 			}
-			removed, ok, err := store.Delete(profile.Name)
+			removed, ok, err := store.Delete(profile.ID)
 			if err != nil {
 				return output.NewError("MIRROR_REGISTRY_DELETE_FAILED", err.Error(), "")
 			}
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "removed": ok, "mirror": removed, "remoteDeleted": deleteRemote, "remoteDeletedPath": deletedPath})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed mirror %s\n", profile.Name)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed mirror %s (%s)\n", profile.Name, profile.ID)
 			if deleteRemote {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "deleted remote files at %s:%s\n", profile.Worker, deletedPath)
 			} else {
@@ -2018,6 +2122,12 @@ func runMirrorForeground(cmd *cobra.Command, opts *options, once bool, pollInter
 			}
 			if !opts.quiet {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "synced %s to %s:%s\n", res.Name, res.Worker, res.ResolvedPath)
+				if opts.verbose {
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  changed: %d item(s), %s\n", len(res.Changed), humanBytes(res.BytesTransferred))
+					for _, change := range res.Changed {
+						_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", change.Code, change.Path)
+					}
+				}
 			}
 		},
 		OnError: func(profile mirror.Profile, err error) {
@@ -2031,6 +2141,29 @@ func runMirrorForeground(cmd *cobra.Command, opts *options, once bool, pollInter
 		return output.NewError("MIRROR_FAILED", err.Error(), "Run workyard mirror status")
 	}
 	return nil
+}
+
+func mirrorRefCommandError(err error) error {
+	var ambiguous mirror.AmbiguousRefError
+	if errors.As(err, &ambiguous) {
+		return output.NewError("MIRROR_AMBIGUOUS", ambiguous.Error(), "Use one of: "+strings.Join(ambiguous.IDs, ", "))
+	}
+	return output.NewError("MIRROR_REGISTRY_READ_FAILED", err.Error(), "")
+}
+
+func humanBytes(value int64) string {
+	if value < 1024 {
+		return fmt.Sprintf("%d B", value)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	size := float64(value)
+	for _, unit := range units {
+		size = size / 1024
+		if size < 1024 {
+			return fmt.Sprintf("%.1f %s", size, unit)
+		}
+	}
+	return fmt.Sprintf("%.1f PB", size/1024)
 }
 
 func checkedMirrorDestination(cmd *cobra.Command, opts *options, reader *bufio.Reader, profile, resolved *mirror.Profile, fixedRemotePath, force bool) (mirror.DestinationCheck, error) {
@@ -2073,11 +2206,35 @@ func printMirrorSetupSummary(w io.Writer, profile mirror.Profile, sshTarget stri
 	_, _ = fmt.Fprintf(w, "  worker:     %s (%s)\n", profile.Worker, sshTarget)
 	_, _ = fmt.Fprintf(w, "  remote:     %s\n", profile.RemotePath)
 	_, _ = fmt.Fprintf(w, "  resolved:   %s\n", check.ResolvedPath)
+	_, _ = fmt.Fprintf(w, "  presets:    %s\n", firstNonEmpty(strings.Join(profile.Presets, ","), "none"))
 	_, _ = fmt.Fprintf(w, "  includeGit: %t\n", profile.IncludeGit)
 	_, _ = fmt.Fprintf(w, "  delete:     %t\n", profile.Delete)
 	if check.State == "non-empty" {
 		_, _ = fmt.Fprintln(w, "  warning:    destination is not empty")
 	}
+}
+
+func printMirrorDoctorReport(w io.Writer, report mirror.DoctorReport) {
+	_, _ = fmt.Fprintln(w, "workyard mirror doctor")
+	rows := make([][]string, 0)
+	for _, profile := range report.Profiles {
+		for _, check := range profile.Checks {
+			rows = append(rows, []string{profile.ID, profile.Name, check.Name, strings.ToUpper(check.Status), check.Message})
+		}
+	}
+	_ = output.WriteTable(w, []string{"ID", "NAME", "CHECK", "STATUS", "MESSAGE"}, rows)
+	for _, profile := range report.Profiles {
+		for _, check := range profile.Checks {
+			if check.Detail != "" && check.Status != mirror.DoctorPass {
+				_, _ = fmt.Fprintf(w, "  %s %s detail: %s\n", profile.ID, check.Name, check.Detail)
+			}
+		}
+	}
+	if report.OK {
+		_, _ = fmt.Fprintln(w, "\nok: mirror checks passed")
+		return
+	}
+	_, _ = fmt.Fprintln(w, "\nfailed: one or more mirror checks failed")
 }
 
 func promptMirrorWorker(w io.Writer, reader *bufio.Reader, stateDir string) (string, error) {
