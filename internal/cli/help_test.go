@@ -46,6 +46,7 @@ func TestRootHelpGroupsCommandsByWorkflow(t *testing.T) {
 		"Primary Workflows",
 		"  deploy      Run the full deploy flow for a project",
 		"  watch       Watch local files, sync changes, and optionally restart services",
+		"  mirror      Continuously mirror registered directories to workers",
 		"Project Configuration",
 		"  init        Create a starter workyard.yaml",
 		"  config      Inspect Workyard config",

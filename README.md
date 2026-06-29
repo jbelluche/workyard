@@ -421,6 +421,52 @@ Supported watch actions:
 
 Watch mode uses filesystem events when available and falls back to polling with `--poll-interval`.
 
+## Mirror Mode
+
+Mirror mode keeps registered local directories reflected on workers without requiring a `workyard.yaml` service config. It is useful when you want to SSH into a Tailscale-connected device and find a normal workspace directory with your latest local edits.
+
+Configure a mirror with the wizard:
+
+```sh
+workyard mirror setup
+```
+
+The wizard asks for:
+
+- Local directory, defaulting to the current directory.
+- Registered worker.
+- Remote destination, defaulting to `~/workspace/<directory-name>`.
+- Confirmation before writing the local mirror registry.
+
+Run all enabled mirrors in the current terminal:
+
+```sh
+workyard mirror
+```
+
+Press `Ctrl-C` to stop foreground mirroring. Start and stop background mirroring with:
+
+```sh
+workyard mirror start
+workyard mirror status
+workyard mirror stop
+```
+
+List and delete configured mirrors:
+
+```sh
+workyard mirror list
+workyard mirror delete <name>
+```
+
+`mirror setup` requires the remote destination to be missing, empty, or already marked as the same Workyard mirror. Use `--force` only when you intentionally want to mirror into a non-empty directory. Mirror syncs use default excludes such as `node_modules`, build outputs, logs, and `.env` files; `.git` is included by default so the remote workspace behaves like a clone.
+
+Deleting a mirror only removes the local registry record by default. To remove the remote files too, pass `--delete-remote`; Workyard will refuse unless the destination contains a matching `.workyard-mirror.json` marker written by mirror sync:
+
+```sh
+workyard mirror delete <name> --delete-remote
+```
+
 ## Run IDs
 
 By default, Workyard derives a run id from the current project. You can provide one explicitly:
