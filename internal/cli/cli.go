@@ -1699,7 +1699,7 @@ func mirrorCommand(opts *options) *cobra.Command {
 	}
 	root.Flags().BoolVar(&once, "once", false, "sync enabled mirrors once and exit")
 	root.Flags().DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "fallback polling interval")
-	root.AddCommand(mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorRenameCommand(opts), mirrorDoctorCommand(opts), mirrorShellCommand(opts), mirrorExecCommand(opts), mirrorTmuxCommand(opts), mirrorDeleteCommand(opts))
+	root.AddCommand(mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorRenameCommand(opts), mirrorDoctorCommand(opts), mirrorShellCommand(opts), mirrorExecCommand(opts), mirrorServicesCommand(opts), mirrorTmuxCommand(opts), mirrorDeleteCommand(opts))
 	return root
 }
 
@@ -2211,6 +2211,533 @@ func mirrorExecCommand(opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&syncBefore, "sync", false, "sync the mirror once before running the command")
 	cmd.Flags().BoolVar(&autoSync, "auto", false, "sync once only when the destination is missing or empty")
 	return cmd
+}
+
+func mirrorServicesCommand(opts *options) *cobra.Command {
+	root := &cobra.Command{
+		Use:     "services",
+		Aliases: []string{"svc"},
+		Short:   "Manage services from a mirrored workspace",
+	}
+	root.AddCommand(mirrorServicesUpCommand(opts))
+	for _, action := range []string{"setup", "build"} {
+		root.AddCommand(mirrorServicesLifecycleCommand(opts, action))
+	}
+	for _, action := range []string{"start", "stop", "restart"} {
+		root.AddCommand(mirrorServicesControlCommand(opts, action))
+	}
+	for _, action := range []string{"status", "inspect", "urls"} {
+		root.AddCommand(mirrorServicesReadCommand(opts, action))
+	}
+	root.AddCommand(mirrorServicesLogsCommand(opts))
+	root.AddCommand(mirrorServicesEventsCommand(opts))
+	root.AddCommand(mirrorServicesWaitCommand(opts))
+	root.AddCommand(mirrorServicesCleanupCommand(opts))
+	return root
+}
+
+func mirrorServicesUpCommand(opts *options) *cobra.Command {
+	var noSync bool
+	var skipSetup bool
+	var skipBuild bool
+	var skipWait bool
+	var timeout string
+	var install bool
+	var artifactDir string
+	var localBinary string
+	cmd := &cobra.Command{
+		Use:   "up [name-or-id] [service...]",
+		Short: "Sync, prepare, and start services from a mirror",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateTimeoutFlag(timeout); err != nil {
+				return err
+			}
+			selection, err := selectMirrorServiceSelection(opts.stateDir, args, true)
+			if err != nil {
+				return err
+			}
+			mode := mirrorPrepareSyncAlways
+			if noSync {
+				mode = mirrorPrepareRequireReady
+			}
+			ctx := cmd.Context()
+			loaded, resolved, check, paths, err := prepareMirrorServiceRun(ctx, opts, selection.Profile, mirrorPrepareOptions{
+				Mode:     mode,
+				Version:  Version,
+				Verbose:  opts.verbose,
+				Quiet:    opts.quiet,
+				Progress: cmd.ErrOrStderr(),
+			})
+			if err != nil {
+				return output.NewError("MIRROR_SERVICES_NOT_READY", err.Error(), "Run workyard mirror services up --sync "+selection.Profile.ID)
+			}
+			services := selection.Services
+			if err := validateServiceArgs(loaded.Config, "start", services); err != nil {
+				return err
+			}
+			callOpts := *opts
+			callOpts.worker = resolved.Worker
+			if install {
+				if _, err := deployInstall(cmd, &callOpts, deployOptions{artifactDir: artifactDir, localBinary: localBinary}, paths); err != nil {
+					return err
+				}
+				if !opts.quiet && !opts.json {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "ok: install")
+				}
+			}
+			if !skipSetup {
+				res, err := remoteDaemonCall(ctx, &callOpts, paths, "setup", nil, controlExtra{})
+				if err != nil {
+					return output.NewError("MIRROR_SERVICES_SETUP_FAILED", err.Error(), "Run workyard mirror services logs "+selection.Profile.ID+" setup")
+				}
+				printMirrorServiceStep(cmd.ErrOrStderr(), opts, "setup", res.Message)
+			}
+			if !skipBuild {
+				res, err := remoteDaemonCall(ctx, &callOpts, paths, "build", nil, controlExtra{})
+				if err != nil {
+					return output.NewError("MIRROR_SERVICES_BUILD_FAILED", err.Error(), "Run workyard mirror services logs "+selection.Profile.ID+" build")
+				}
+				printMirrorServiceStep(cmd.ErrOrStderr(), opts, "build", res.Message)
+			}
+			stopExtra := controlExtra{}
+			if len(services) == 0 {
+				stopExtra.All = true
+			}
+			if res, err := remoteDaemonCall(ctx, &callOpts, paths, "stop", services, stopExtra); err == nil {
+				printMirrorServiceStep(cmd.ErrOrStderr(), opts, "stop", serviceStatusSummary(res.Services))
+			} else if opts.verbose && !opts.json {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before start skipped: %s\n", err)
+			}
+			startRes, err := remoteDaemonCall(ctx, &callOpts, paths, "start", services, controlExtra{Timeout: timeout})
+			if err != nil {
+				return output.NewError("MIRROR_SERVICES_START_FAILED", err.Error(), "Run workyard mirror services inspect "+selection.Profile.ID)
+			}
+			printMirrorServiceStep(cmd.ErrOrStderr(), opts, "start", serviceStatusSummary(startRes.Services))
+			waitServices := services
+			if len(waitServices) == 0 {
+				waitServices = config.ServiceNames(loaded.Config.Services)
+			}
+			if !skipWait && len(waitServices) > 0 {
+				res, err := remoteDaemonCall(ctx, &callOpts, paths, "wait", waitServices, controlExtra{Healthy: true, Timeout: timeout})
+				if err != nil {
+					return output.NewError("MIRROR_SERVICES_WAIT_FAILED", err.Error(), "Run workyard mirror services inspect "+selection.Profile.ID)
+				}
+				printMirrorServiceStep(cmd.ErrOrStderr(), opts, "wait", res.Message)
+			}
+			urlsRes, err := remoteDaemonCall(ctx, &callOpts, paths, "urls", services, controlExtra{})
+			if err != nil {
+				return output.NewError("MIRROR_SERVICES_URLS_FAILED", err.Error(), "Run workyard mirror services status "+selection.Profile.ID)
+			}
+			rememberMirrorServiceRun(cmd.ErrOrStderr(), opts, loaded, resolved, paths, check.ResolvedPath)
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{
+					"ok":               true,
+					"mirror":           selection.Profile,
+					"worker":           resolved.Worker,
+					"project":          paths.Project,
+					"runId":            paths.RunID,
+					"remoteRunPath":    paths.RunRoot,
+					"remoteSourcePath": check.ResolvedPath,
+					"services":         urlsRes.Services,
+					"urls":             urlsRes.URLs,
+				})
+			}
+			printDeployURLs(cmd.OutOrStdout(), urlsRes.URLs)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&noSync, "no-sync", false, "do not sync the mirror before starting services")
+	cmd.Flags().BoolVar(&skipSetup, "skip-setup", false, "skip project setup")
+	cmd.Flags().BoolVar(&skipBuild, "skip-build", false, "skip project build")
+	cmd.Flags().BoolVar(&skipWait, "skip-wait", false, "skip waiting for healthy services")
+	cmd.Flags().StringVar(&timeout, "timeout", "60s", "health wait timeout")
+	cmd.Flags().BoolVar(&install, "install", false, "install or upgrade the remote worker binary before starting")
+	cmd.Flags().StringVar(&artifactDir, "artifact-dir", "dist", "directory containing workyard-<os>-<arch> artifacts")
+	cmd.Flags().StringVar(&localBinary, "local-binary", "", "specific local binary to upload when --install is set")
+	return cmd
+}
+
+func mirrorServicesLifecycleCommand(opts *options, action string) *cobra.Command {
+	var syncBefore bool
+	var autoSync bool
+	cmd := &cobra.Command{
+		Use:   action + " [name-or-id]",
+		Short: "Run mirror service " + action,
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mode := mirrorServicePrepareMode(syncBefore, autoSync)
+			return runMirrorServiceControl(cmd, opts, action, args, false, controlExtra{}, mode)
+		},
+	}
+	cmd.Flags().BoolVar(&syncBefore, "sync", false, "sync the mirror once before running")
+	cmd.Flags().BoolVar(&autoSync, "auto", false, "sync once only when the destination is missing or empty")
+	return cmd
+}
+
+func mirrorServicesControlCommand(opts *options, action string) *cobra.Command {
+	var syncBefore bool
+	var autoSync bool
+	var all bool
+	var timeout string
+	cmd := &cobra.Command{
+		Use:   action + " [name-or-id] [service...]",
+		Short: "Run mirror service " + action,
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if timeout != "" {
+				if err := validateTimeoutFlag(timeout); err != nil {
+					return err
+				}
+			}
+			mode := mirrorServicePrepareMode(syncBefore, autoSync)
+			return runMirrorServiceControl(cmd, opts, action, args, true, controlExtra{All: all, Timeout: timeout}, mode)
+		},
+	}
+	cmd.Flags().BoolVar(&syncBefore, "sync", false, "sync the mirror once before running")
+	cmd.Flags().BoolVar(&autoSync, "auto", false, "sync once only when the destination is missing or empty")
+	if action == "stop" {
+		cmd.Flags().BoolVar(&all, "all", false, "stop all services (the default when no services are named)")
+	}
+	if action == "start" || action == "restart" {
+		cmd.Flags().StringVar(&timeout, "timeout", "", "startup health timeout")
+	}
+	return cmd
+}
+
+func mirrorServicesReadCommand(opts *options, action string) *cobra.Command {
+	return &cobra.Command{
+		Use:   action + " [name-or-id]",
+		Short: "Show mirror service " + action,
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runMirrorServiceControl(cmd, opts, action, args, false, controlExtra{}, mirrorPrepareRequireReady)
+		},
+	}
+}
+
+func mirrorServicesLogsCommand(opts *options) *cobra.Command {
+	var tail int
+	var maxBytes int64
+	var stream string
+	cmd := &cobra.Command{
+		Use:   "logs [name-or-id] <service>",
+		Short: "Read bounded logs for a mirrored service",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			selection, target, err := selectMirrorServiceLogSelection(opts.stateDir, args)
+			if err != nil {
+				return err
+			}
+			return runMirrorServiceSelection(cmd, opts, "logs", selection, []string{target}, controlExtra{Tail: tail, MaxBytes: maxBytes, Stream: stream}, mirrorPrepareRequireReady)
+		},
+	}
+	cmd.Flags().IntVar(&tail, "tail", 200, "lines to read")
+	cmd.Flags().Int64Var(&maxBytes, "max-bytes", 128*1024, "maximum bytes to read")
+	cmd.Flags().StringVar(&stream, "stream", "both", "stdout, stderr, or both")
+	return cmd
+}
+
+func mirrorServicesEventsCommand(opts *options) *cobra.Command {
+	var tail int
+	var maxBytes int64
+	cmd := &cobra.Command{
+		Use:   "events [name-or-id]",
+		Short: "Read lifecycle events for mirrored services",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runMirrorServiceControl(cmd, opts, "events", args, false, controlExtra{Tail: tail, MaxBytes: maxBytes}, mirrorPrepareRequireReady)
+		},
+	}
+	cmd.Flags().IntVar(&tail, "tail", 100, "events to read")
+	cmd.Flags().Int64Var(&maxBytes, "max-bytes", 128*1024, "maximum bytes to read")
+	return cmd
+}
+
+func mirrorServicesWaitCommand(opts *options) *cobra.Command {
+	var healthy bool
+	var status string
+	var timeout string
+	cmd := &cobra.Command{
+		Use:   "wait [name-or-id] [service...]",
+		Short: "Wait for mirrored services",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateTimeoutFlag(timeout); err != nil {
+				return err
+			}
+			return runMirrorServiceControl(cmd, opts, "wait", args, true, controlExtra{Healthy: healthy, Status: status, Timeout: timeout}, mirrorPrepareRequireReady)
+		},
+	}
+	cmd.Flags().BoolVar(&healthy, "healthy", true, "wait for healthy services")
+	cmd.Flags().StringVar(&status, "status", "", "wait for a specific status")
+	cmd.Flags().StringVar(&timeout, "timeout", "60s", "wait timeout")
+	return cmd
+}
+
+func mirrorServicesCleanupCommand(opts *options) *cobra.Command {
+	var stop bool
+	var noStop bool
+	cmd := &cobra.Command{
+		Use:   "cleanup [name-or-id]",
+		Short: "Stop services and remove mirror service run state",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			selection, err := selectMirrorServiceSelection(opts.stateDir, args, false)
+			if err != nil {
+				return err
+			}
+			loaded, resolved, check, paths, err := prepareMirrorServiceRun(cmd.Context(), opts, selection.Profile, mirrorPrepareOptions{
+				Mode:     mirrorPrepareRequireReady,
+				Version:  Version,
+				Verbose:  opts.verbose,
+				Quiet:    true,
+				Progress: cmd.ErrOrStderr(),
+			})
+			if err != nil {
+				return output.NewError("MIRROR_SERVICES_NOT_READY", err.Error(), "")
+			}
+			callOpts := *opts
+			callOpts.worker = resolved.Worker
+			if noStop {
+				stop = false
+			}
+			if stop {
+				if _, err := remoteDaemonCall(cmd.Context(), &callOpts, paths, "stop", nil, controlExtra{All: true}); err != nil && opts.verbose {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before cleanup failed: %s\n", err)
+				}
+			}
+			if err := cleanupMirrorServiceRun(cmd.Context(), resolved, paths, check.ResolvedPath); err != nil {
+				return output.NewError("MIRROR_SERVICES_CLEANUP_FAILED", err.Error(), "")
+			}
+			store := registry.New(registry.DefaultPath(opts.stateDir))
+			_, _ = store.Remove(resolved.Worker, paths.Project, paths.RunID)
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "mirror": selection.Profile, "worker": resolved.Worker, "project": loaded.Config.Name, "runId": paths.RunID, "removed": paths.RunRoot})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed mirror service run %s:%s\n", resolved.Worker, paths.RunRoot)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&stop, "stop", true, "stop services before removing mirror service run state")
+	cmd.Flags().BoolVar(&noStop, "no-stop", false, "skip stopping services before cleanup")
+	_ = cmd.Flags().MarkHidden("no-stop")
+	return cmd
+}
+
+type mirrorServiceSelection struct {
+	Profile  mirror.Profile
+	Services []string
+}
+
+func mirrorServicePrepareMode(syncBefore, autoSync bool) mirrorPrepareMode {
+	if syncBefore {
+		return mirrorPrepareSyncAlways
+	}
+	if autoSync {
+		return mirrorPrepareSyncAuto
+	}
+	return mirrorPrepareRequireReady
+}
+
+func runMirrorServiceControl(cmd *cobra.Command, opts *options, action string, args []string, allowServices bool, extra controlExtra, mode mirrorPrepareMode) error {
+	selection, err := selectMirrorServiceSelection(opts.stateDir, args, allowServices)
+	if err != nil {
+		return err
+	}
+	return runMirrorServiceSelection(cmd, opts, action, selection, selection.Services, extra, mode)
+}
+
+func runMirrorServiceSelection(cmd *cobra.Command, opts *options, action string, selection mirrorServiceSelection, services []string, extra controlExtra, mode mirrorPrepareMode) error {
+	loaded, resolved, check, paths, err := prepareMirrorServiceRun(cmd.Context(), opts, selection.Profile, mirrorPrepareOptions{
+		Mode:     mode,
+		Version:  Version,
+		Verbose:  opts.verbose,
+		Quiet:    opts.quiet,
+		Progress: cmd.ErrOrStderr(),
+	})
+	if err != nil {
+		return output.NewError("MIRROR_SERVICES_NOT_READY", err.Error(), "Run workyard mirror services up "+selection.Profile.ID)
+	}
+	if err := validateServiceArgs(loaded.Config, action, services); err != nil {
+		return err
+	}
+	callOpts := *opts
+	callOpts.worker = resolved.Worker
+	if action == "logs" || action == "events" {
+		if err := remoteDaemonPassthrough(cmd.Context(), &callOpts, paths, action, services, extra, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+			var pe printedError
+			if errors.As(err, &pe) {
+				return err
+			}
+			if output.AsCommandError(err) != nil {
+				return err
+			}
+			return output.NewError("MIRROR_SERVICES_FAILED", err.Error(), "Run workyard mirror services inspect "+selection.Profile.ID)
+		}
+		rememberMirrorServiceRun(cmd.ErrOrStderr(), opts, loaded, resolved, paths, check.ResolvedPath)
+		return nil
+	}
+	res, err := remoteDaemonCall(cmd.Context(), &callOpts, paths, action, services, extra)
+	if err != nil {
+		return output.NewError("MIRROR_SERVICES_FAILED", err.Error(), "Run workyard mirror services inspect "+selection.Profile.ID)
+	}
+	rememberMirrorServiceRun(cmd.ErrOrStderr(), opts, loaded, resolved, paths, check.ResolvedPath)
+	return printDaemonResponse(cmd.OutOrStdout(), res, opts.json, action)
+}
+
+func selectMirrorServiceSelection(stateDir string, args []string, allowServices bool) (mirrorServiceSelection, error) {
+	store := mirror.NewStore(mirror.DefaultPath(stateDir))
+	profiles, err := store.List()
+	if err != nil {
+		return mirrorServiceSelection{}, output.NewError("MIRROR_REGISTRY_READ_FAILED", err.Error(), "")
+	}
+	ref := ""
+	services := args
+	if len(args) > 0 {
+		if _, ok, err := mirror.Resolve(profiles, args[0]); err != nil {
+			return mirrorServiceSelection{}, mirrorRefCommandError(err)
+		} else if ok {
+			ref = args[0]
+			services = args[1:]
+		}
+	}
+	if !allowServices && len(services) > 0 {
+		return mirrorServiceSelection{}, output.NewError("MIRROR_SERVICES_ARGS_INVALID", "this mirror services command does not accept service names", "")
+	}
+	profile, ok, err := selectMirrorProfileForShell(profiles, ref)
+	if err != nil {
+		return mirrorServiceSelection{}, mirrorRefCommandError(err)
+	}
+	if !ok {
+		return mirrorServiceSelection{}, mirrorSelectionError(profiles, ref)
+	}
+	return mirrorServiceSelection{Profile: profile, Services: services}, nil
+}
+
+func selectMirrorServiceLogSelection(stateDir string, args []string) (mirrorServiceSelection, string, error) {
+	store := mirror.NewStore(mirror.DefaultPath(stateDir))
+	profiles, err := store.List()
+	if err != nil {
+		return mirrorServiceSelection{}, "", output.NewError("MIRROR_REGISTRY_READ_FAILED", err.Error(), "")
+	}
+	ref := ""
+	target := ""
+	if len(args) == 2 {
+		ref = args[0]
+		target = args[1]
+	} else {
+		if _, ok, err := mirror.Resolve(profiles, args[0]); err != nil {
+			return mirrorServiceSelection{}, "", mirrorRefCommandError(err)
+		} else if ok {
+			return mirrorServiceSelection{}, "", output.NewError("MIRROR_SERVICES_ARGS_INVALID", "logs requires a service target after the mirror id or name", "Use workyard mirror services logs "+args[0]+" <service>")
+		}
+		target = args[0]
+	}
+	profile, ok, err := selectMirrorProfileForShell(profiles, ref)
+	if err != nil {
+		return mirrorServiceSelection{}, "", mirrorRefCommandError(err)
+	}
+	if !ok {
+		return mirrorServiceSelection{}, "", mirrorSelectionError(profiles, ref)
+	}
+	return mirrorServiceSelection{Profile: profile}, target, nil
+}
+
+func mirrorSelectionError(profiles []mirror.Profile, ref string) error {
+	if len(profiles) == 0 {
+		return output.NewError("MIRROR_NONE_CONFIGURED", "no mirrors are configured", "Run workyard mirror setup")
+	}
+	if ref != "" {
+		return output.NewError("MIRROR_NOT_FOUND", fmt.Sprintf("mirror %q was not found", ref), "Run workyard mirror list")
+	}
+	return output.NewError("MIRROR_REF_REQUIRED", "multiple mirrors are configured and none uniquely match the current directory", "Pass a mirror id from workyard mirror list")
+}
+
+func prepareMirrorServiceRun(ctx context.Context, opts *options, profile mirror.Profile, prep mirrorPrepareOptions) (config.Loaded, mirror.Profile, mirror.DestinationCheck, remote.Paths, error) {
+	resolved, err := resolveMirrorProfile(opts.stateDir, profile)
+	if err != nil {
+		return config.Loaded{}, mirror.Profile{}, mirror.DestinationCheck{}, remote.Paths{}, output.NewError("MIRROR_WORKER_INVALID", err.Error(), "Run workyard workers list")
+	}
+	loaded, err := config.Load(resolved.LocalRoot)
+	if err != nil {
+		return config.Loaded{}, mirror.Profile{}, mirror.DestinationCheck{}, remote.Paths{}, output.NewError("CONFIG_LOAD_FAILED", err.Error(), "Mirror service commands require a workyard.yaml in the mirrored directory")
+	}
+	check, err := prepareMirrorForRemoteUse(ctx, resolved, prep)
+	if err != nil {
+		return config.Loaded{}, mirror.Profile{}, mirror.DestinationCheck{}, remote.Paths{}, err
+	}
+	home, err := remote.Home(ctx, resolved.Worker)
+	if err != nil {
+		return config.Loaded{}, mirror.Profile{}, mirror.DestinationCheck{}, remote.Paths{}, err
+	}
+	paths, err := remote.BuildPaths(home, opts.remoteRoot, loaded.Config.Name, resolved.ID)
+	if err != nil {
+		return config.Loaded{}, mirror.Profile{}, mirror.DestinationCheck{}, remote.Paths{}, err
+	}
+	if err := ensureMirrorServiceRun(ctx, resolved, paths, check.ResolvedPath); err != nil {
+		return config.Loaded{}, mirror.Profile{}, mirror.DestinationCheck{}, remote.Paths{}, err
+	}
+	return loaded, resolved, check, paths, nil
+}
+
+func ensureMirrorServiceRun(ctx context.Context, profile mirror.Profile, paths remote.Paths, mirrorPath string) error {
+	script := strings.Join([]string{
+		"set -eu",
+		"run=" + remote.ShellQuote(paths.RunRoot),
+		"source=" + remote.ShellQuote(paths.Source),
+		"logs=" + remote.ShellQuote(paths.Logs),
+		"mirror=" + remote.ShellQuote(mirrorPath),
+		"if [ -L \"$run\" ]; then printf 'refusing symlink run root\\n' >&2; exit 1; fi",
+		"if [ -e \"$run\" ] && [ ! -d \"$run\" ]; then printf 'mirror service run root is not a directory\\n' >&2; exit 1; fi",
+		"if [ -L \"$mirror\" ] || [ ! -d \"$mirror\" ]; then printf 'mirror destination is not a real directory\\n' >&2; exit 1; fi",
+		"mkdir -p \"$run\" \"$logs\"",
+		"chmod go-rwx \"$run\" \"$logs\"",
+		"if [ -L \"$source\" ]; then target=$(readlink \"$source\"); if [ \"$target\" != \"$mirror\" ]; then printf 'refusing source symlink pointing at %s\\n' \"$target\" >&2; exit 1; fi",
+		"elif [ -e \"$source\" ]; then printf 'refusing non-symlink source path\\n' >&2; exit 1",
+		"else ln -s \"$mirror\" \"$source\"; fi",
+	}, "\n")
+	_, err := remote.Run(ctx, profile.Worker, []string{"sh", "-lc", script}, nil, 20*time.Second)
+	return err
+}
+
+func cleanupMirrorServiceRun(ctx context.Context, profile mirror.Profile, paths remote.Paths, mirrorPath string) error {
+	script := strings.Join([]string{
+		"set -eu",
+		"run=" + remote.ShellQuote(paths.RunRoot),
+		"source=" + remote.ShellQuote(paths.Source),
+		"mirror=" + remote.ShellQuote(mirrorPath),
+		"if [ -L \"$run\" ]; then printf 'refusing symlink run root\\n' >&2; exit 1; fi",
+		"if [ -e \"$source\" ]; then if [ ! -L \"$source\" ]; then printf 'refusing non-symlink source path\\n' >&2; exit 1; fi; target=$(readlink \"$source\"); if [ \"$target\" != \"$mirror\" ]; then printf 'refusing source symlink pointing at %s\\n' \"$target\" >&2; exit 1; fi; fi",
+		"rm -rf -- \"$run\"",
+	}, "\n")
+	_, err := remote.Run(ctx, profile.Worker, []string{"sh", "-lc", script}, nil, 30*time.Second)
+	return err
+}
+
+func rememberMirrorServiceRun(w io.Writer, opts *options, loaded config.Loaded, profile mirror.Profile, paths remote.Paths, mirrorPath string) {
+	rememberRun(w, opts, loaded, registry.RunRef{
+		Worker:           profile.Worker,
+		Project:          paths.Project,
+		RunID:            paths.RunID,
+		RemoteRoot:       opts.remoteRoot,
+		RemoteRunPath:    paths.RunRoot,
+		RemoteSourcePath: mirrorPath,
+		RemoteBinary:     opts.remoteBinary,
+		LocalRoot:        loaded.Config.Root,
+		ConfigPath:       loaded.Config.Path,
+	})
+}
+
+func printMirrorServiceStep(w io.Writer, opts *options, name, message string) {
+	if opts.quiet || opts.json {
+		return
+	}
+	if strings.TrimSpace(message) == "" {
+		_, _ = fmt.Fprintf(w, "ok: %s\n", name)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "ok: %s - %s\n", name, message)
 }
 
 func mirrorTmuxCommand(opts *options) *cobra.Command {
@@ -3782,11 +4309,55 @@ func remoteDaemonCall(ctx context.Context, opts *options, paths remote.Paths, ac
 	if err := remote.EnsureDaemon(ctx, opts.worker, paths, opts.remoteBinary); err != nil {
 		return worker.Response{}, err
 	}
+	argv := remoteDaemonArgv(opts, paths, action, services, extra, true)
+	out, err := remote.Run(ctx, opts.worker, argv, nil, remoteTimeout(action, extra.Timeout))
+	if err != nil {
+		return worker.Response{}, err
+	}
+	var res worker.Response
+	if err := json.Unmarshal([]byte(out.Stdout), &res); err != nil {
+		return worker.Response{}, fmt.Errorf("decode %s response: %w", action, err)
+	}
+	warnDaemonVersion(os.Stderr, opts, res.Version)
+	if !res.OK {
+		if res.Error != nil {
+			return res, fmt.Errorf("%s: %s", res.Error.Code, res.Error.Message)
+		}
+		return res, fmt.Errorf("%s failed", action)
+	}
+	return res, nil
+}
+
+func remoteDaemonPassthrough(ctx context.Context, opts *options, paths remote.Paths, action string, services []string, extra controlExtra, stdout, stderr io.Writer) error {
+	if err := remote.EnsureDaemon(ctx, opts.worker, paths, opts.remoteBinary); err != nil {
+		return err
+	}
+	argv := remoteDaemonArgv(opts, paths, action, services, extra, opts.json)
+	res, err := remote.Run(ctx, opts.worker, argv, nil, remoteTimeout(action, extra.Timeout))
+	if res.Stdout != "" {
+		_, _ = io.WriteString(stdout, res.Stdout)
+	}
+	if res.Stderr != "" && opts.verbose {
+		_, _ = io.WriteString(stderr, res.Stderr)
+	}
+	if err != nil {
+		if strings.TrimSpace(res.Stdout) != "" {
+			return printedError{err: err, exitCode: 1}
+		}
+		return fmt.Errorf("%s on %s: %s", action, opts.worker, truncateForDisplay(err.Error(), 2048))
+	}
+	return nil
+}
+
+func remoteDaemonArgv(opts *options, paths remote.Paths, action string, services []string, extra controlExtra, jsonOut bool) []string {
 	binary := paths.Binary
 	if opts.remoteBinary != "" {
 		binary = opts.remoteBinary
 	}
-	argv := []string{binary, "daemonctl", action, "--socket", paths.Socket, "--run-root", paths.RunRoot, "--project-name", paths.Project, "--run-id", paths.RunID, "--worker-name", opts.worker, "--json"}
+	argv := []string{binary, "daemonctl", action, "--socket", paths.Socket, "--run-root", paths.RunRoot, "--project-name", paths.Project, "--run-id", paths.RunID, "--worker-name", opts.worker}
+	if jsonOut {
+		argv = append(argv, "--json")
+	}
 	if extra.All {
 		argv = append(argv, "--all")
 	}
@@ -3808,23 +4379,7 @@ func remoteDaemonCall(ctx context.Context, opts *options, paths remote.Paths, ac
 	if extra.Timeout != "" {
 		argv = append(argv, "--timeout", extra.Timeout)
 	}
-	argv = append(argv, services...)
-	out, err := remote.Run(ctx, opts.worker, argv, nil, remoteTimeout(action, extra.Timeout))
-	if err != nil {
-		return worker.Response{}, err
-	}
-	var res worker.Response
-	if err := json.Unmarshal([]byte(out.Stdout), &res); err != nil {
-		return worker.Response{}, fmt.Errorf("decode %s response: %w", action, err)
-	}
-	warnDaemonVersion(os.Stderr, opts, res.Version)
-	if !res.OK {
-		if res.Error != nil {
-			return res, fmt.Errorf("%s: %s", res.Error.Code, res.Error.Message)
-		}
-		return res, fmt.Errorf("%s failed", action)
-	}
-	return res, nil
+	return append(argv, services...)
 }
 
 // deployProjectAndServices splits deploy's positional args into a project

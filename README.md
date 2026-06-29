@@ -124,6 +124,15 @@ workyard mirror exec --auto -- git status
 workyard mirror exec --auto -- npm test
 ```
 
+If the mirrored project has a `workyard.yaml`, start its services from the mirror:
+
+```sh
+workyard mirror services up --timeout 90s
+workyard mirror services status
+workyard mirror services logs api --tail 200
+workyard mirror services restart api
+```
+
 Run continuous mirroring in the current terminal:
 
 ```sh
@@ -166,6 +175,18 @@ Validate the config:
 ```sh
 workyard config check
 ```
+
+When the project is mirrored, prefer the mirror service bridge:
+
+```sh
+workyard mirror services up <id> --timeout 90s
+workyard mirror services status <id>
+workyard mirror services logs <id> web --tail 200
+workyard mirror services restart <id> web
+workyard mirror services cleanup <id>
+```
+
+`mirror services up` syncs the mirror, runs `setup` and `build`, starts services through the worker daemon, waits for health checks, and prints preview URLs. The service run ID is the mirror ID, so two mirrors of the same repo get isolated run state and independent port allocation. `cleanup` removes only the daemon service run wrapper; it leaves the mirrored files intact.
 
 Deploy everything to a worker:
 
@@ -570,6 +591,23 @@ workyard mirror exec <name-or-id> -- git status
 workyard mirror exec <name-or-id> --auto -- npm test
 workyard mirror exec --auto -- go test ./...
 ```
+
+Run configured services from the mirrored workspace:
+
+```sh
+workyard mirror services up <name-or-id> --timeout 90s
+workyard mirror services status <name-or-id>
+workyard mirror services inspect <name-or-id>
+workyard mirror services urls <name-or-id>
+workyard mirror services logs <name-or-id> <service> --tail 200
+workyard mirror services events <name-or-id>
+workyard mirror services restart <name-or-id> <service>
+workyard mirror services cleanup <name-or-id>
+```
+
+These commands load `workyard.yaml` from the local mirror source, sync when appropriate, then manage services against the remote mirror destination. Workyard creates a small managed run wrapper under `~/.workyard/runs/<project>/<mirror-id>` whose `source` points at the mirror. That keeps service logs, status, health checks, peer service environment variables, and port allocation in the daemon while preserving the remote workspace as the place you edit, shell into, and inspect.
+
+Mirror excludes stop local generated directories from being uploaded, and they also protect worker-generated directories from later sync deletion. After `mirror services up`, the remote mirror may contain worker-local `node_modules`, `.next`, `bin`, or similar build outputs created by setup/build/start commands; those files are intentionally remote-local.
 
 List, pause, resume, rename, doctor, and delete configured mirrors:
 

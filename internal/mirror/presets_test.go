@@ -43,10 +43,38 @@ func TestResolvePresetSelectionAutoAndNone(t *testing.T) {
 	}
 }
 
+func TestDetectPresetsFindsNestedMonorepoProjects(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "services", "analytics"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "services", "analytics", "go.mod"), []byte("module fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(DetectPresets(root), ",")
+	for _, want := range []string{"go", "node"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("detected presets %q missing %q", got, want)
+		}
+	}
+}
+
 func TestPresetExcludesPreservesCase(t *testing.T) {
 	got := strings.Join(PresetExcludes([]string{"dotnet"}), "\n")
 	if !strings.Contains(got, "TestResults") {
 		t.Fatalf("expected TestResults case to be preserved, got:\n%s", got)
+	}
+}
+
+func TestPresetExcludesCoverNodeAndGoGeneratedOutputs(t *testing.T) {
+	got := strings.Join(PresetExcludes([]string{"node", "go"}), "\n")
+	for _, want := range []string{"*.tsbuildinfo", "bin"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected generated output exclude %q, got:\n%s", want, got)
+		}
 	}
 }
 

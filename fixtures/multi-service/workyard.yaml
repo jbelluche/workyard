@@ -6,6 +6,8 @@ sync:
     - .next
     - .turbo
     - .cache
+    - "*.tsbuildinfo"
+    - services/analytics/bin
     - "*.log"
 
 worker:
@@ -16,8 +18,8 @@ setup:
   timeout: 10m
 
 build:
-  command: scripts/verify-runtime.sh
-  timeout: 30s
+  command: scripts/build-analytics-remote.sh
+  timeout: 10m
 
 services:
   analytics:

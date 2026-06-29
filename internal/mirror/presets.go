@@ -20,6 +20,7 @@ var presetDefinitions = map[string]Preset{
 		Detect: []string{"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "deno.json", "deno.jsonc"},
 		Excludes: []string{
 			"node_modules",
+			"*.tsbuildinfo",
 			".parcel-cache",
 			".svelte-kit",
 			".angular",
@@ -48,6 +49,7 @@ var presetDefinitions = map[string]Preset{
 		Name:   "go",
 		Detect: []string{"go.mod", "go.work"},
 		Excludes: []string{
+			"bin",
 			".gocache",
 			"coverage.out",
 			"*.test",
@@ -171,7 +173,55 @@ func presetMatches(root string, preset Preset) bool {
 			}
 		}
 	}
-	return false
+	return presetMatchesNested(root, preset, 4)
+}
+
+func presetMatchesNested(root string, preset Preset, maxDepth int) bool {
+	root = filepath.Clean(root)
+	found := false
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || found {
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		depth := strings.Count(rel, string(filepath.Separator)) + 1
+		if entry.IsDir() {
+			if shouldSkipPresetDir(entry.Name()) {
+				return filepath.SkipDir
+			}
+			if depth > maxDepth {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if depth > maxDepth+1 {
+			return nil
+		}
+		base := entry.Name()
+		for _, pattern := range preset.Detect {
+			if ok, _ := filepath.Match(pattern, base); ok {
+				found = true
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	return found
+}
+
+func shouldSkipPresetDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", ".next", ".turbo", "dist", "build", "target", ".venv", "venv":
+		return true
+	default:
+		return false
+	}
 }
 
 func uniqueSorted(values []string) []string {

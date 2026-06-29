@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackbelluche/workyard/internal/mirror"
 	"github.com/jackbelluche/workyard/internal/output"
+	"github.com/jackbelluche/workyard/internal/remote"
 )
 
 func TestMirrorPauseRequiresIDWhenNameIsAmbiguous(t *testing.T) {
@@ -465,6 +466,104 @@ func TestMirrorShellRequiresIDForCurrentDirectoryCollision(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(ambiguous.IDs, ","), "aaaaaa") || !strings.Contains(strings.Join(ambiguous.IDs, ","), "bbbbbb") {
 		t.Fatalf("ambiguous ids=%#v", ambiguous.IDs)
+	}
+}
+
+func TestMirrorServicesSelectionUsesIDWhenPresent(t *testing.T) {
+	stateDir, firstID := writeMirrorConflictRegistry(t)
+	selection, err := selectMirrorServiceSelection(stateDir, []string{firstID, "api", "events"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.Profile.ID != firstID {
+		t.Fatalf("profile id=%q, want %q", selection.Profile.ID, firstID)
+	}
+	if strings.Join(selection.Services, ",") != "api,events" {
+		t.Fatalf("services=%#v, want api/events", selection.Services)
+	}
+}
+
+func TestMirrorServicesSelectionRequiresIDForCurrentDirectoryCollision(t *testing.T) {
+	stateDir, firstID := writeMirrorConflictRegistry(t)
+	store := mirror.NewStore(mirror.DefaultPath(stateDir))
+	profile, ok, err := store.Get(firstID)
+	if err != nil || !ok {
+		t.Fatalf("get profile ok=%t err=%v", ok, err)
+	}
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	if err := os.Chdir(profile.LocalRoot); err != nil {
+		t.Fatal(err)
+	}
+	_, err = selectMirrorServiceSelection(stateDir, []string{"api"}, true)
+	if err == nil {
+		t.Fatal("expected current-directory mirror collision to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_AMBIGUOUS" {
+		t.Fatalf("code=%q, want MIRROR_AMBIGUOUS", ce.Code)
+	}
+}
+
+func TestMirrorServicesLogSelectionTreatsSingleArgAsServiceWithOneMirror(t *testing.T) {
+	stateDir := t.TempDir()
+	local := filepath.Join(stateDir, "project")
+	if err := ensureTestDir(local); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := mirror.NewStore(mirror.DefaultPath(stateDir)).Upsert(mirror.Profile{
+		Name:       "project",
+		Enabled:    true,
+		LocalRoot:  local,
+		Worker:     "jack@jack-r5-16gb",
+		RemotePath: "~/workspace/project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, target, err := selectMirrorServiceLogSelection(stateDir, []string{"api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.Profile.ID != stored.ID {
+		t.Fatalf("profile id=%q, want %q", selection.Profile.ID, stored.ID)
+	}
+	if target != "api" {
+		t.Fatalf("target=%q, want api", target)
+	}
+}
+
+func TestMirrorServicesLogSelectionRequiresTargetAfterMirrorID(t *testing.T) {
+	stateDir, firstID := writeMirrorConflictRegistry(t)
+	_, _, err := selectMirrorServiceLogSelection(stateDir, []string{firstID})
+	if err == nil {
+		t.Fatal("expected missing log target to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_SERVICES_ARGS_INVALID" {
+		t.Fatalf("code=%q, want MIRROR_SERVICES_ARGS_INVALID", ce.Code)
+	}
+}
+
+func TestRemoteDaemonArgvControlsJSONMode(t *testing.T) {
+	opts := &options{worker: "jack@worker"}
+	paths := remote.Paths{
+		Binary:  "/home/jack/.workyard/bin/workyard",
+		Socket:  "/home/jack/.workyard/daemon/workyard.sock",
+		RunRoot: "/home/jack/.workyard/runs/project/run",
+		Project: "project",
+		RunID:   "run",
+	}
+	plain := strings.Join(remoteDaemonArgv(opts, paths, "logs", []string{"api"}, controlExtra{Tail: 10}, false), " ")
+	if strings.Contains(plain, "--json") {
+		t.Fatalf("plain argv unexpectedly included --json: %s", plain)
+	}
+	jsonArgv := strings.Join(remoteDaemonArgv(opts, paths, "logs", []string{"api"}, controlExtra{Tail: 10}, true), " ")
+	if !strings.Contains(jsonArgv, "--json") {
+		t.Fatalf("json argv missing --json: %s", jsonArgv)
 	}
 }
 
