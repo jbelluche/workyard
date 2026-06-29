@@ -166,6 +166,21 @@ func ReadyDestination(ctx context.Context, profile Profile) (DestinationCheck, e
 	}
 }
 
+func EnsureDestination(ctx context.Context, profile Profile) (string, error) {
+	home, err := remote.Home(ctx, profile.Worker)
+	if err != nil {
+		return "", err
+	}
+	resolved := ResolveRemotePath(home, profile.RemotePath)
+	if err := ValidateResolvedRemotePath(home, resolved); err != nil {
+		return "", err
+	}
+	if err := prepareDestination(ctx, profile.Worker, resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
 func Sync(ctx context.Context, profile Profile, opts SyncOptions) (SyncResult, error) {
 	started := time.Now().UTC()
 	home, err := remote.Home(ctx, profile.Worker)

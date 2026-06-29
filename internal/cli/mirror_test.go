@@ -99,6 +99,249 @@ func TestMirrorDeleteByIDWhenNameIsAmbiguous(t *testing.T) {
 	}
 }
 
+func TestMirrorRenameByID(t *testing.T) {
+	stateDir, firstID := writeMirrorConflictRegistry(t)
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "rename", firstID, "renamed-project"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("rename by id: %v", err)
+	}
+	store := mirror.NewStore(mirror.DefaultPath(stateDir))
+	profile, ok, err := store.Get(firstID)
+	if err != nil || !ok {
+		t.Fatalf("get renamed profile ok=%t err=%v", ok, err)
+	}
+	if profile.Name != "renamed-project" {
+		t.Fatalf("name=%q, want renamed-project", profile.Name)
+	}
+	if !strings.Contains(out.String(), firstID) {
+		t.Fatalf("output missing id %q:\n%s", firstID, out.String())
+	}
+}
+
+func TestMirrorRenameRequiresIDWhenNameIsAmbiguous(t *testing.T) {
+	stateDir, firstID := writeMirrorConflictRegistry(t)
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "rename", "project", "renamed-project"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected ambiguous mirror name to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_AMBIGUOUS" {
+		t.Fatalf("code=%q, want MIRROR_AMBIGUOUS", ce.Code)
+	}
+	if !strings.Contains(ce.Hint, firstID) {
+		t.Fatalf("hint %q missing id %q", ce.Hint, firstID)
+	}
+}
+
+func TestMirrorRenameKeepsDefaultTmuxSessionName(t *testing.T) {
+	stateDir, firstID := writeMirrorConflictRegistry(t)
+	store := mirror.NewStore(mirror.DefaultPath(stateDir))
+	before, ok, err := store.Get(firstID)
+	if err != nil || !ok {
+		t.Fatalf("get profile ok=%t err=%v", ok, err)
+	}
+	beforeSession, err := mirrorShellSessionName(before, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Rename(firstID, "renamed-project"); err != nil || !ok {
+		t.Fatalf("rename ok=%t err=%v", ok, err)
+	}
+	after, ok, err := store.Get(firstID)
+	if err != nil || !ok {
+		t.Fatalf("get renamed profile ok=%t err=%v", ok, err)
+	}
+	afterSession, err := mirrorShellSessionName(after, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeSession != afterSession {
+		t.Fatalf("session changed after rename: before=%q after=%q", beforeSession, afterSession)
+	}
+	if afterSession != "workyard-"+firstID {
+		t.Fatalf("session=%q, want workyard-%s", afterSession, firstID)
+	}
+}
+
+func TestMirrorTmuxKillRequiresIDWhenNameIsAmbiguous(t *testing.T) {
+	stateDir, firstID := writeMirrorConflictRegistry(t)
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "tmux", "kill", "project"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected ambiguous mirror name to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_AMBIGUOUS" {
+		t.Fatalf("code=%q, want MIRROR_AMBIGUOUS", ce.Code)
+	}
+	if !strings.Contains(ce.Hint, firstID) {
+		t.Fatalf("hint %q missing id %q", ce.Hint, firstID)
+	}
+}
+
+func TestMirrorTmuxListReportsNoMirrorsConfigured(t *testing.T) {
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", t.TempDir(), "mirror", "tmux", "list"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected tmux list without mirrors to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_NONE_CONFIGURED" {
+		t.Fatalf("code=%q, want MIRROR_NONE_CONFIGURED", ce.Code)
+	}
+}
+
+func TestMirrorTmuxScriptsUseExactSessionTargets(t *testing.T) {
+	inspect := mirrorTmuxInspectScript("workyard-abc123")
+	kill := mirrorTmuxKillScript("workyard-abc123")
+	shell := mirrorTmuxShellScript("/home/jack/workspace/project", "workyard-abc123")
+	for name, script := range map[string]string{"inspect": inspect, "kill": kill, "shell": shell} {
+		if !strings.Contains(script, "target==workyard-abc123") && !strings.Contains(script, "target='=workyard-abc123'") {
+			t.Fatalf("%s script does not use exact target:\n%s", name, script)
+		}
+	}
+}
+
+func TestMirrorStartFailsWithoutConfiguredMirrors(t *testing.T) {
+	stateDir := t.TempDir()
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "start"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected start without mirrors to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_NONE_CONFIGURED" {
+		t.Fatalf("code=%q, want MIRROR_NONE_CONFIGURED", ce.Code)
+	}
+	if !strings.Contains(ce.Message, "no mirrors are configured") {
+		t.Fatalf("message=%q, want no mirrors configured", ce.Message)
+	}
+	if strings.Contains(out.String(), "mirror started") {
+		t.Fatalf("start printed success unexpectedly:\n%s", out.String())
+	}
+	if _, err := os.Stat(mirror.DefaultPIDPath(stateDir)); !os.IsNotExist(err) {
+		t.Fatalf("pid file should not exist, stat err=%v", err)
+	}
+}
+
+func TestMirrorStartFailsWhenAllMirrorsPaused(t *testing.T) {
+	stateDir := t.TempDir()
+	local := filepath.Join(stateDir, "project")
+	if err := ensureTestDir(local); err != nil {
+		t.Fatal(err)
+	}
+	store := mirror.NewStore(mirror.DefaultPath(stateDir))
+	if _, err := store.Upsert(mirror.Profile{
+		Name:       "project",
+		Enabled:    false,
+		LocalRoot:  local,
+		Worker:     "jack@jack-r5-16gb",
+		RemotePath: "~/workspace/project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "start"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected start with paused mirrors to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_NONE_CONFIGURED" {
+		t.Fatalf("code=%q, want MIRROR_NONE_CONFIGURED", ce.Code)
+	}
+	if !strings.Contains(ce.Message, "no enabled mirrors are configured") {
+		t.Fatalf("message=%q, want no enabled mirrors configured", ce.Message)
+	}
+	if !strings.Contains(ce.Hint, "mirror resume <id>") {
+		t.Fatalf("hint=%q, want resume guidance", ce.Hint)
+	}
+	if strings.Contains(out.String(), "mirror started") {
+		t.Fatalf("start printed success unexpectedly:\n%s", out.String())
+	}
+}
+
+func TestMirrorExecRequiresDashBeforeCommand(t *testing.T) {
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"mirror", "exec", "echo", "hi"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected exec without -- to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_EXEC_ARGS_INVALID" {
+		t.Fatalf("code=%q, want MIRROR_EXEC_ARGS_INVALID", ce.Code)
+	}
+}
+
+func TestMirrorExecRequiresCommandAfterDash(t *testing.T) {
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"mirror", "exec", "--"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected exec without command to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_EXEC_ARGS_INVALID" {
+		t.Fatalf("code=%q, want MIRROR_EXEC_ARGS_INVALID", ce.Code)
+	}
+}
+
+func TestMirrorCommandFromArgsQuotesShellWords(t *testing.T) {
+	got := mirrorCommandFromArgs([]string{"printf", "%s", "hello world", "it's ok"})
+	want := "printf %s 'hello world' 'it'\\''s ok'"
+	if got != want {
+		t.Fatalf("command=%q, want %q", got, want)
+	}
+}
+
+func TestFixStaleMirrorPIDRemovesInvalidPIDFile(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "mirror.pid")
+	if err := os.WriteFile(pidPath, []byte("not-a-pid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	action, ok := fixStaleMirrorPID(pidPath)
+	if !ok {
+		t.Fatal("expected stale pid action")
+	}
+	if action.Status != "fixed" {
+		t.Fatalf("status=%q, want fixed", action.Status)
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("pid file should be removed, stat err=%v", err)
+	}
+}
+
 func TestMirrorShellRequiresIDWhenNameIsAmbiguous(t *testing.T) {
 	stateDir, firstID := writeMirrorConflictRegistry(t)
 	root := newRoot(&options{})

@@ -184,6 +184,32 @@ func (s Store) SetEnabled(ref string, enabled bool) (Profile, bool, error) {
 	return profile, true, s.save(file)
 }
 
+func (s Store) Rename(ref, name string) (Profile, bool, error) {
+	file, err := s.load()
+	if err != nil {
+		return Profile{}, false, err
+	}
+	profile, ok, err := Resolve(file.Mirrors, ref)
+	if err != nil || !ok {
+		return Profile{}, ok, err
+	}
+	name, err = ValidateName(name)
+	if err != nil {
+		return Profile{}, false, err
+	}
+	now := time.Now().UTC()
+	for i := range file.Mirrors {
+		if file.Mirrors[i].ID == profile.ID {
+			file.Mirrors[i].Name = name
+			file.Mirrors[i].UpdatedAt = now
+			profile = file.Mirrors[i]
+			break
+		}
+	}
+	sortProfiles(file.Mirrors)
+	return profile, true, s.save(file)
+}
+
 func (s Store) Delete(ref string) (Profile, bool, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" || strings.ContainsAny(ref, "\x00\r\n/\\") {
