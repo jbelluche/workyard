@@ -129,6 +129,43 @@ func CheckDestination(ctx context.Context, profile Profile) (DestinationCheck, e
 	return check, nil
 }
 
+func ReadyDestination(ctx context.Context, profile Profile) (DestinationCheck, error) {
+	check, err := CheckDestination(ctx, profile)
+	if err != nil {
+		return DestinationCheck{}, err
+	}
+	switch check.State {
+	case "marker-only":
+		if check.OK && check.Marker != nil {
+			return check, nil
+		}
+		if check.Marker != nil {
+			return check, fmt.Errorf("destination marker belongs to mirror %q from %s", check.Marker.Name, check.Marker.LocalRoot)
+		}
+		return check, fmt.Errorf("destination marker is not readable")
+	case "non-empty":
+		marker, err := ReadMarker(ctx, profile.Worker, check.ResolvedPath)
+		if err != nil {
+			return check, fmt.Errorf("destination is not synced yet; missing matching %s marker: %w", MarkerFileName, err)
+		}
+		check.Marker = &marker
+		check.OK = MarkerMatches(marker, profile)
+		if !check.OK {
+			return check, fmt.Errorf("destination marker belongs to mirror %q from %s", marker.Name, marker.LocalRoot)
+		}
+		return check, nil
+	case "missing":
+		return check, fmt.Errorf("destination does not exist yet")
+	case "empty":
+		return check, fmt.Errorf("destination is empty and has no mirror marker")
+	default:
+		if check.NonEmptyReason != "" {
+			return check, fmt.Errorf("%s", check.NonEmptyReason)
+		}
+		return check, fmt.Errorf("destination is not ready: %s", check.State)
+	}
+}
+
 func Sync(ctx context.Context, profile Profile, opts SyncOptions) (SyncResult, error) {
 	started := time.Now().UTC()
 	home, err := remote.Home(ctx, profile.Worker)

@@ -1699,7 +1699,7 @@ func mirrorCommand(opts *options) *cobra.Command {
 	}
 	root.Flags().BoolVar(&once, "once", false, "sync enabled mirrors once and exit")
 	root.Flags().DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "fallback polling interval")
-	root.AddCommand(mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorDoctorCommand(opts), mirrorDeleteCommand(opts))
+	root.AddCommand(mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorDoctorCommand(opts), mirrorShellCommand(opts), mirrorDeleteCommand(opts))
 	return root
 }
 
@@ -2007,6 +2007,96 @@ func mirrorDoctorCommand(opts *options) *cobra.Command {
 	}
 }
 
+func mirrorShellCommand(opts *options) *cobra.Command {
+	var syncBefore bool
+	var remoteCommandText string
+	var useTmux bool
+	var sessionOverride string
+	cmd := &cobra.Command{
+		Use:   "shell [name-or-id]",
+		Short: "Open a shell in a mirrored directory",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.json {
+				return output.NewError("MIRROR_SHELL_JSON_UNSUPPORTED", "mirror shell streams SSH output and does not support --json", "")
+			}
+			if useTmux && remoteCommandText != "" {
+				return output.NewError("MIRROR_SHELL_ARGS_INVALID", "--tmux cannot be used with --command", "Run an interactive tmux shell, or remove --tmux to run a command")
+			}
+			if sessionOverride != "" && !useTmux {
+				return output.NewError("MIRROR_SHELL_ARGS_INVALID", "--session requires --tmux", "")
+			}
+			store := mirror.NewStore(mirror.DefaultPath(opts.stateDir))
+			profiles, err := store.List()
+			if err != nil {
+				return output.NewError("MIRROR_REGISTRY_READ_FAILED", err.Error(), "")
+			}
+			ref := ""
+			if len(args) == 1 {
+				ref = args[0]
+			}
+			profile, ok, err := selectMirrorProfileForShell(profiles, ref)
+			if err != nil {
+				return mirrorRefCommandError(err)
+			}
+			if !ok {
+				if len(profiles) == 0 {
+					return output.NewError("MIRROR_NONE_CONFIGURED", "no mirrors are configured", "Run workyard mirror setup")
+				}
+				if ref != "" {
+					return output.NewError("MIRROR_NOT_FOUND", fmt.Sprintf("mirror %q was not found", ref), "Run workyard mirror list")
+				}
+				return output.NewError("MIRROR_REF_REQUIRED", "multiple mirrors are configured and none uniquely match the current directory", "Pass a mirror id from workyard mirror list")
+			}
+			resolved, err := resolveMirrorProfile(opts.stateDir, profile)
+			if err != nil {
+				return output.NewError("MIRROR_WORKER_INVALID", err.Error(), "Run workyard workers list")
+			}
+			if syncBefore {
+				res, err := mirror.Sync(cmd.Context(), resolved, mirror.SyncOptions{Version: Version})
+				if err != nil {
+					return output.NewError("MIRROR_SHELL_SYNC_FAILED", err.Error(), "Run workyard mirror doctor "+profile.ID)
+				}
+				if !opts.quiet {
+					printMirrorSyncResult(cmd.ErrOrStderr(), res, opts.verbose)
+				}
+			}
+			check, err := mirror.ReadyDestination(cmd.Context(), resolved)
+			if err != nil {
+				return output.NewError("MIRROR_SHELL_NOT_READY", fmt.Sprintf("%s:%s is not ready: %s", resolved.Worker, resolved.RemotePath, err), "Run workyard mirror --once, then workyard mirror shell "+profile.ID)
+			}
+			if remoteCommandText != "" {
+				return runMirrorShellRemoteCommand(cmd.Context(), resolved.Worker, check.ResolvedPath, remoteCommandText, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			}
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return output.NewError("MIRROR_SHELL_TTY_REQUIRED", "interactive mirror shell requires a terminal", "Use --command for non-interactive commands")
+			}
+			if useTmux {
+				sessionName, err := mirrorShellSessionName(profile, sessionOverride)
+				if err != nil {
+					return output.NewError("MIRROR_SHELL_SESSION_INVALID", err.Error(), "")
+				}
+				if err := requireRemoteCommand(cmd.Context(), resolved.Worker, "tmux"); err != nil {
+					return output.NewError("MIRROR_SHELL_TMUX_MISSING", "tmux is not available on the worker", "Install tmux on the worker or run without --tmux")
+				}
+				if !opts.quiet {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "opening tmux shell %s for %s (%s) at %s:%s\n", sessionName, profile.Name, profile.ID, resolved.Worker, check.ResolvedPath)
+				}
+				return runMirrorInteractiveSSH(cmd.Context(), resolved.Worker, mirrorRemoteShellCommand(mirrorTmuxShellScript(check.ResolvedPath, sessionName)), cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			}
+			if !opts.quiet {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "opening shell for %s (%s) at %s:%s\n", profile.Name, profile.ID, resolved.Worker, check.ResolvedPath)
+			}
+			return runMirrorInteractiveSSH(cmd.Context(), resolved.Worker, mirrorRemoteShellCommand(mirrorPlainShellScript(check.ResolvedPath)), cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
+	}
+	cmd.Flags().BoolVar(&syncBefore, "sync", false, "sync the mirror once before opening the shell")
+	cmd.Flags().StringVarP(&remoteCommandText, "command", "c", "", "run a command in the remote mirror and exit")
+	cmd.Flags().BoolVar(&useTmux, "tmux", false, "open the shell inside a persistent tmux session")
+	cmd.Flags().StringVar(&sessionOverride, "session", "", "tmux session name (defaults to workyard-<mirror-id>)")
+	return cmd
+}
+
 func mirrorSetEnabled(cmd *cobra.Command, opts *options, ref string, enabled bool) error {
 	store := mirror.NewStore(mirror.DefaultPath(opts.stateDir))
 	profile, ok, err := store.SetEnabled(ref, enabled)
@@ -2088,6 +2178,17 @@ func mirrorDeleteCommand(opts *options) *cobra.Command {
 	return cmd
 }
 
+func printMirrorSyncResult(w io.Writer, res mirror.SyncResult, verbose bool) {
+	_, _ = fmt.Fprintf(w, "synced %s to %s:%s\n", res.Name, res.Worker, res.ResolvedPath)
+	if !verbose {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "  changed: %d item(s), %s\n", len(res.Changed), humanBytes(res.BytesTransferred))
+	for _, change := range res.Changed {
+		_, _ = fmt.Fprintf(w, "  %s %s\n", change.Code, change.Path)
+	}
+}
+
 func runMirrorForeground(cmd *cobra.Command, opts *options, once bool, pollInterval time.Duration) error {
 	store := mirror.NewStore(mirror.DefaultPath(opts.stateDir))
 	profiles, err := store.List()
@@ -2121,13 +2222,7 @@ func runMirrorForeground(cmd *cobra.Command, opts *options, once bool, pollInter
 				return
 			}
 			if !opts.quiet {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "synced %s to %s:%s\n", res.Name, res.Worker, res.ResolvedPath)
-				if opts.verbose {
-					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  changed: %d item(s), %s\n", len(res.Changed), humanBytes(res.BytesTransferred))
-					for _, change := range res.Changed {
-						_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", change.Code, change.Path)
-					}
-				}
+				printMirrorSyncResult(cmd.OutOrStdout(), res, opts.verbose)
 			}
 		},
 		OnError: func(profile mirror.Profile, err error) {
@@ -2141,6 +2236,199 @@ func runMirrorForeground(cmd *cobra.Command, opts *options, once bool, pollInter
 		return output.NewError("MIRROR_FAILED", err.Error(), "Run workyard mirror status")
 	}
 	return nil
+}
+
+func selectMirrorProfileForShell(profiles []mirror.Profile, ref string) (mirror.Profile, bool, error) {
+	if strings.TrimSpace(ref) != "" {
+		return mirror.Resolve(profiles, ref)
+	}
+	if len(profiles) == 0 {
+		return mirror.Profile{}, false, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return mirror.Profile{}, false, err
+	}
+	matches := mirrorProfilesContainingPath(profiles, cwd)
+	if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	if len(matches) > 1 {
+		return mirror.Profile{}, false, ambiguousMirrorProfiles("current directory", matches)
+	}
+	if len(profiles) == 1 {
+		return profiles[0], true, nil
+	}
+	return mirror.Profile{}, false, nil
+}
+
+func mirrorProfilesContainingPath(profiles []mirror.Profile, cwd string) []mirror.Profile {
+	cwd = mirrorComparablePath(cwd)
+	var matches []mirror.Profile
+	for _, profile := range profiles {
+		if mirrorLocalRootContains(profile.LocalRoot, cwd) {
+			matches = append(matches, profile)
+		}
+	}
+	if len(matches) < 2 {
+		return matches
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		return len(filepath.Clean(matches[i].LocalRoot)) > len(filepath.Clean(matches[j].LocalRoot))
+	})
+	longest := len(filepath.Clean(matches[0].LocalRoot))
+	var mostSpecific []mirror.Profile
+	for _, profile := range matches {
+		if len(filepath.Clean(profile.LocalRoot)) != longest {
+			break
+		}
+		mostSpecific = append(mostSpecific, profile)
+	}
+	return mostSpecific
+}
+
+func mirrorLocalRootContains(localRoot, cwd string) bool {
+	root := mirrorComparablePath(localRoot)
+	rel, err := filepath.Rel(root, cwd)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+func mirrorComparablePath(value string) string {
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		abs = filepath.Clean(value)
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	return abs
+}
+
+func ambiguousMirrorProfiles(ref string, profiles []mirror.Profile) mirror.AmbiguousRefError {
+	ids := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		ids = append(ids, profile.ID)
+	}
+	sort.Strings(ids)
+	return mirror.AmbiguousRefError{Ref: ref, IDs: ids}
+}
+
+func runMirrorShellRemoteCommand(ctx context.Context, worker, resolvedPath, userCommand string, stdin io.Reader, stdout, stderr io.Writer) error {
+	script := "cd " + remote.ShellQuote(resolvedPath) + " && " + userCommand
+	return runMirrorSSH(ctx, worker, mirrorRemoteShellCommand(script), stdin, stdout, stderr, false, true)
+}
+
+func runMirrorInteractiveSSH(ctx context.Context, worker, remoteCommand string, stdin io.Reader, stdout, stderr io.Writer) error {
+	return runMirrorSSH(ctx, worker, remoteCommand, stdin, stdout, stderr, true, false)
+}
+
+func runMirrorSSH(ctx context.Context, worker, remoteCommand string, stdin io.Reader, stdout, stderr io.Writer, tty bool, batch bool) error {
+	if err := remote.ValidateWorker(worker); err != nil {
+		return err
+	}
+	args := []string{}
+	if batch {
+		args = append(args, "-o", "BatchMode=yes")
+	}
+	if tty {
+		args = append(args, "-t")
+	}
+	args = append(args, "--", worker, remoteCommand)
+	ssh := exec.CommandContext(ctx, "ssh", args...)
+	ssh.Stdin = stdin
+	ssh.Stdout = stdout
+	ssh.Stderr = stderr
+	if err := ssh.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return printedError{err: fmt.Errorf("ssh %s exited with status %d", worker, exit.ExitCode()), exitCode: exit.ExitCode()}
+		}
+		return err
+	}
+	return nil
+}
+
+func requireRemoteCommand(ctx context.Context, worker, name string) error {
+	_, err := remote.Run(ctx, worker, []string{"sh", "-lc", "command -v " + remote.ShellQuote(name) + " >/dev/null"}, nil, 8*time.Second)
+	return err
+}
+
+func mirrorRemoteShellCommand(script string) string {
+	return "sh -lc " + remote.ShellQuote(script)
+}
+
+func mirrorPlainShellScript(resolvedPath string) string {
+	return "cd " + remote.ShellQuote(resolvedPath) + " && exec \"${SHELL:-sh}\" -l"
+}
+
+func mirrorTmuxShellScript(resolvedPath, sessionName string) string {
+	return strings.Join([]string{
+		"set -eu",
+		"case \"${TERM:-}\" in ''|dumb|unknown) export TERM=xterm-256color;; esac",
+		"cd " + remote.ShellQuote(resolvedPath),
+		"session=" + remote.ShellQuote(sessionName),
+		"if tmux has-session -t \"$session\" 2>/dev/null; then exec tmux attach-session -t \"$session\"; fi",
+		"exec tmux new-session -s \"$session\"",
+	}, "\n")
+}
+
+func mirrorShellSessionName(profile mirror.Profile, override string) (string, error) {
+	if strings.TrimSpace(override) != "" {
+		name := strings.TrimSpace(override)
+		if err := validateMirrorShellSessionName(name); err != nil {
+			return "", err
+		}
+		return name, nil
+	}
+	seed := profile.ID
+	if seed == "" {
+		seed = profile.Name
+	}
+	name := "workyard-" + sanitizeMirrorShellSessionPart(seed)
+	if name == "workyard-" {
+		name = "workyard-session"
+	}
+	return name, nil
+}
+
+func validateMirrorShellSessionName(name string) error {
+	if name == "" {
+		return fmt.Errorf("tmux session name is required")
+	}
+	if len(name) > 80 {
+		return fmt.Errorf("tmux session name is too long")
+	}
+	if strings.ContainsAny(name, ":\r\n\t /\\") {
+		return fmt.Errorf("tmux session name may only contain letters, numbers, dots, dashes, and underscores")
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			continue
+		}
+		return fmt.Errorf("tmux session name may only contain letters, numbers, dots, dashes, and underscores")
+	}
+	return nil
+}
+
+func sanitizeMirrorShellSessionPart(value string) string {
+	value = strings.TrimSpace(value)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		valid := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_'
+		if valid {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func mirrorRefCommandError(err error) error {
