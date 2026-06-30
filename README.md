@@ -11,20 +11,34 @@ Workyard does not guess where to run. Mirror records store the worker selected d
 
 ## Install
 
-Clone the repository over HTTPS and run the local installer:
+Install from the public repository without cloning:
 
 ```sh
-git clone https://github.com/jackbelluche/workyard.git
+curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | sh
+```
+
+The installer supports macOS and Linux. It downloads the latest release artifact when one exists and falls back to building from a public source archive when Go is available. It installs Workyard to `~/.local/bin/workyard` by default and adds a marked PATH block to your shell profile (`~/.zshrc` or `~/.bashrc`) when needed.
+
+Install a specific release, custom repo, or custom directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | WORKYARD_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | WORKYARD_INSTALL_DIR="$HOME/bin" sh
+curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | sh -s -- --repo owner/workyard --method source --ref main
+```
+
+For local development from a checkout, use:
+
+```sh
+git clone https://github.com/jbelluche/workyard.git
 cd workyard
 scripts/local/install.sh
 ```
 
-The local installer supports macOS and Linux. It builds Workyard from source, installs it to `~/.local/bin/workyard`, and adds a marked PATH block to your shell profile (`~/.zshrc` or `~/.bashrc`) when needed.
-
 Uninstall the local binary:
 
 ```sh
-scripts/local/uninstall.sh
+rm -f ~/.local/bin/workyard
 ```
 
 The default model is private and local:
@@ -37,7 +51,7 @@ The default model is private and local:
 
 ## Requirements
 
-- Go 1.25 or newer
+- Go 1.25 or newer when building from source
 - `rsync`
 - `ssh`
 - Tailscale installed, running, and connected
@@ -681,13 +695,13 @@ checksums.txt
 manifest.json
 ```
 
-End-user install script, once releases are published from a public or otherwise accessible repository:
+End-user install script:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jackbelluche/workyard/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | sh
 ```
 
-Set `WORKYARD_REPO`, `WORKYARD_VERSION`, or `WORKYARD_INSTALL_DIR` before running the script when installing from a non-default release location. Homebrew formulas can reference the tarball URL and matching SHA-256 from `checksums.txt`.
+Set `WORKYARD_REPO`, `WORKYARD_VERSION`, `WORKYARD_INSTALL_DIR`, `WORKYARD_INSTALL_METHOD`, or `WORKYARD_REF` when installing from a non-default location. Homebrew formulas can reference the tarball URL and matching SHA-256 from `checksums.txt`.
 
 ## Command Reference
 
