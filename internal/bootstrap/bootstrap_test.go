@@ -41,6 +41,25 @@ func TestResolveWorkerFromRegistry(t *testing.T) {
 	}
 }
 
+func TestResolveWorkerFromGlobalConfig(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(globalPath, []byte(`
+[[workers]]
+name = "devbox"
+ssh = "jack@devbox.example.com"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ResolveWorkerWithGlobal("devbox", Config{}, filepath.Join(dir, "workers.yaml"), globalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Name != "devbox" || resolved.Target != "jack@devbox.example.com" || resolved.Source != "global-config" {
+		t.Fatalf("unexpected resolved worker: %#v", resolved)
+	}
+}
+
 func TestDryRunPlansBootstrapSteps(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "workyard.bootstrap.yaml")
 	cfg := []byte(`

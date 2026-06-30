@@ -25,6 +25,7 @@ import (
 	"github.com/jackbelluche/workyard/internal/bootstrap"
 	"github.com/jackbelluche/workyard/internal/config"
 	"github.com/jackbelluche/workyard/internal/doctor"
+	"github.com/jackbelluche/workyard/internal/globalconfig"
 	"github.com/jackbelluche/workyard/internal/mirror"
 	"github.com/jackbelluche/workyard/internal/monitor"
 	"github.com/jackbelluche/workyard/internal/output"
@@ -376,15 +377,16 @@ func workersCommand(opts *options) *cobra.Command {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{
 					"ok":         true,
 					"configPath": registry.DefaultWorkersPath(opts.stateDir),
+					"globalPath": globalconfig.DefaultPath(opts.stateDir),
 					"runsPath":   registry.DefaultPath(opts.stateDir),
 					"workers":    rows,
 				})
 			}
 			tableRows := make([][]string, 0, len(rows))
 			for _, row := range rows {
-				tableRows = append(tableRows, []string{row.Name, row.SSHTarget, row.Source, fmt.Sprint(row.RunCount), formatTime(row.UpdatedAt)})
+				tableRows = append(tableRows, []string{row.Name, row.SSHTarget, row.Source, firstNonEmpty(row.RemoteWorkspace, "-"), fmt.Sprint(row.RunCount), formatTime(row.UpdatedAt)})
 			}
-			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "SSH TARGET", "SOURCE", "RUNS", "UPDATED"}, tableRows)
+			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "SSH TARGET", "SOURCE", "WORKSPACE", "RUNS", "UPDATED"}, tableRows)
 		},
 	}
 	var addUser string
@@ -437,6 +439,7 @@ func workersCommand(opts *options) *cobra.Command {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{
 					"ok":         true,
 					"configPath": registry.DefaultWorkersPath(opts.stateDir),
+					"globalPath": globalconfig.DefaultPath(opts.stateDir),
 					"workers":    rows,
 				})
 			}
@@ -460,6 +463,13 @@ func workersCommand(opts *options) *cobra.Command {
 			ref, ok, err := workerStore.Resolve(args[0])
 			if err != nil {
 				return output.NewError("REGISTRY_REMOVE_FAILED", err.Error(), "")
+			}
+			if !ok {
+				if configured, configuredOK, cfgErr := resolveConfiguredWorker(opts.stateDir, args[0]); cfgErr != nil {
+					return output.NewError("WORKER_CONFIG_READ_FAILED", cfgErr.Error(), "")
+				} else if configuredOK {
+					return output.NewError("WORKER_CONFIG_READONLY", fmt.Sprintf("%s is configured in %s", configured.Name, globalconfig.DefaultPath(opts.stateDir)), "Edit the global config file to remove static workers")
+				}
 			}
 			target := args[0]
 			if ok {
@@ -552,6 +562,7 @@ func workersCommand(opts *options) *cobra.Command {
 				res := map[string]any{
 					"ok":          true,
 					"path":        registry.DefaultWorkersPath(opts.stateDir),
+					"globalPath":  globalconfig.DefaultPath(opts.stateDir),
 					"workers":     rows,
 					"workerCount": len(rows),
 				}
@@ -566,9 +577,9 @@ func workersCommand(opts *options) *cobra.Command {
 			}
 			tableRows := make([][]string, 0, len(rows))
 			for _, row := range rows {
-				tableRows = append(tableRows, []string{row.Name, row.SSHTarget, optionalBool(row.OnlineKnown, row.Online), fmt.Sprint(row.InTailscale), formatTime(row.UpdatedAt)})
+				tableRows = append(tableRows, []string{row.Name, row.SSHTarget, firstNonEmpty(row.Source, "-"), optionalBool(row.OnlineKnown, row.Online), fmt.Sprint(row.InTailscale), formatTime(row.UpdatedAt)})
 			}
-			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "SSH TARGET", "ONLINE", "TAILSCALE", "UPDATED"}, tableRows)
+			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "SSH TARGET", "SOURCE", "ONLINE", "TAILSCALE", "UPDATED"}, tableRows)
 		},
 	}
 	configCmd.AddCommand(configShow)
@@ -577,13 +588,14 @@ func workersCommand(opts *options) *cobra.Command {
 }
 
 type workerListRow struct {
-	Name      string    `json:"name"`
-	Host      string    `json:"host,omitempty"`
-	User      string    `json:"user,omitempty"`
-	SSHTarget string    `json:"sshTarget"`
-	Source    string    `json:"source"`
-	RunCount  int       `json:"runCount"`
-	UpdatedAt time.Time `json:"updatedAt,omitempty,omitzero"`
+	Name            string    `json:"name"`
+	Host            string    `json:"host,omitempty"`
+	User            string    `json:"user,omitempty"`
+	SSHTarget       string    `json:"sshTarget"`
+	Source          string    `json:"source"`
+	RemoteWorkspace string    `json:"remoteWorkspace,omitempty"`
+	RunCount        int       `json:"runCount"`
+	UpdatedAt       time.Time `json:"updatedAt,omitempty,omitzero"`
 }
 
 type workerDiscoveryRow struct {
@@ -638,9 +650,8 @@ type tailscaleDevice struct {
 }
 
 func workerListRows(opts *options) ([]workerListRow, error) {
-	workerStore := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
 	runStore := registry.New(registry.DefaultPath(opts.stateDir))
-	registered, err := workerStore.List()
+	registered, err := workerConfigs(opts.stateDir)
 	if err != nil {
 		return nil, output.NewError("WORKER_CONFIG_READ_FAILED", err.Error(), "")
 	}
@@ -680,13 +691,14 @@ func workerListRows(opts *options) ([]workerListRow, error) {
 			}
 		}
 		rows = append(rows, workerListRow{
-			Name:      worker.Name,
-			Host:      worker.Host,
-			User:      worker.User,
-			SSHTarget: target,
-			Source:    firstNonEmpty(worker.Source, "manual"),
-			RunCount:  runCount,
-			UpdatedAt: updated,
+			Name:            worker.Name,
+			Host:            worker.Host,
+			User:            worker.User,
+			SSHTarget:       target,
+			Source:          firstNonEmpty(worker.Source, "manual"),
+			RemoteWorkspace: worker.RemoteWorkspace,
+			RunCount:        runCount,
+			UpdatedAt:       updated,
 		})
 		seen[target] = true
 		seen[worker.Name] = true
@@ -712,8 +724,7 @@ func discoverWorkerRows(ctx context.Context, opts *options) ([]workerDiscoveryRo
 	if err != nil {
 		return nil, output.NewError("TAILSCALE_DISCOVER_FAILED", err.Error(), "Run tailscale status --json to inspect the local Tailscale state")
 	}
-	store := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
-	registered, err := store.List()
+	registered, err := workerConfigs(opts.stateDir)
 	if err != nil {
 		return nil, output.NewError("WORKER_CONFIG_READ_FAILED", err.Error(), "")
 	}
@@ -722,8 +733,7 @@ func discoverWorkerRows(ctx context.Context, opts *options) ([]workerDiscoveryRo
 }
 
 func registeredWorkerStatusRows(ctx context.Context, opts *options) ([]workerStatusRow, error, error) {
-	store := registry.NewWorkerStore(registry.DefaultWorkersPath(opts.stateDir))
-	registered, err := store.List()
+	registered, err := workerConfigs(opts.stateDir)
 	if err != nil {
 		return nil, nil, output.NewError("WORKER_CONFIG_READ_FAILED", err.Error(), "")
 	}
@@ -878,8 +888,7 @@ func resolveWorkerTarget(stateDir, value string) (string, error) {
 	if registry.IsLocalWorker(value) {
 		return registry.LocalWorkerName, nil
 	}
-	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
-	worker, ok, err := store.Resolve(value)
+	worker, ok, err := resolveWorkerConfig(stateDir, value)
 	if err != nil {
 		return "", err
 	}
@@ -887,6 +896,97 @@ func resolveWorkerTarget(stateDir, value string) (string, error) {
 		return worker.EffectiveSSHTarget(), nil
 	}
 	return value, nil
+}
+
+func resolveWorkerConfig(stateDir, value string) (registry.WorkerConfig, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return registry.WorkerConfig{}, false, nil
+	}
+	workers, err := workerConfigs(stateDir)
+	if err != nil {
+		return registry.WorkerConfig{}, false, err
+	}
+	for _, worker := range workers {
+		if worker.Name == value || worker.Host == value || worker.EffectiveSSHTarget() == value || trimDNSName(worker.DNSName) == value {
+			return worker, true, nil
+		}
+	}
+	return registry.WorkerConfig{}, false, nil
+}
+
+func resolveConfiguredWorker(stateDir, value string) (registry.WorkerConfig, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return registry.WorkerConfig{}, false, nil
+	}
+	loaded, err := globalconfig.LoadDefault(stateDir)
+	if err != nil {
+		return registry.WorkerConfig{}, false, err
+	}
+	workers, err := loaded.Workers()
+	if err != nil {
+		return registry.WorkerConfig{}, false, err
+	}
+	for _, worker := range workers {
+		if worker.Name == value || worker.Host == value || worker.EffectiveSSHTarget() == value || trimDNSName(worker.DNSName) == value {
+			return worker, true, nil
+		}
+	}
+	return registry.WorkerConfig{}, false, nil
+}
+
+func workerConfigs(stateDir string) ([]registry.WorkerConfig, error) {
+	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
+	registered, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	loaded, err := globalconfig.LoadDefault(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	configured, err := loaded.Workers()
+	if err != nil {
+		return nil, err
+	}
+	return mergeWorkerConfigs(registered, configured), nil
+}
+
+func mergeWorkerConfigs(registered, configured []registry.WorkerConfig) []registry.WorkerConfig {
+	out := make([]registry.WorkerConfig, 0, len(registered)+len(configured))
+	indexByKey := map[string]int{}
+	keysByIndex := map[int][]string{}
+	add := func(worker registry.WorkerConfig) {
+		keys := workerKeys(worker.Name, worker.Host, worker.DNSName, worker.EffectiveSSHTarget())
+		for _, key := range keys {
+			if index, ok := indexByKey[key]; ok {
+				for _, oldKey := range keysByIndex[index] {
+					delete(indexByKey, oldKey)
+				}
+				out[index] = worker
+				keysByIndex[index] = keys
+				for _, nextKey := range keys {
+					indexByKey[nextKey] = index
+				}
+				return
+			}
+		}
+		index := len(out)
+		out = append(out, worker)
+		keysByIndex[index] = keys
+		for _, key := range keys {
+			indexByKey[key] = index
+		}
+	}
+	for _, worker := range registered {
+		add(worker)
+	}
+	for _, worker := range configured {
+		add(worker)
+	}
+	sortWorkersByName(out)
+	return out
 }
 
 func discoverTailscaleDevices(ctx context.Context) ([]tailscaleDevice, error) {
@@ -1002,6 +1102,14 @@ func workerKeys(values ...string) []string {
 	return out
 }
 
+func trimDNSName(value string) string {
+	return strings.TrimSuffix(strings.TrimSpace(value), ".")
+}
+
+func sortWorkersByName(workers []registry.WorkerConfig) {
+	sort.Slice(workers, func(i, j int) bool { return workers[i].Name < workers[j].Name })
+}
+
 func splitWorkerTarget(value string) (string, string, bool) {
 	value = strings.TrimSpace(value)
 	parts := strings.Split(value, "@")
@@ -1031,15 +1139,16 @@ func currentUsername() string {
 
 func workerWithTarget(worker registry.WorkerConfig) map[string]any {
 	return map[string]any{
-		"name":         worker.Name,
-		"host":         worker.Host,
-		"user":         worker.User,
-		"sshTarget":    worker.EffectiveSSHTarget(),
-		"source":       worker.Source,
-		"dnsName":      worker.DNSName,
-		"tailscaleIPs": worker.TailscaleIPs,
-		"registeredAt": worker.RegisteredAt,
-		"updatedAt":    worker.UpdatedAt,
+		"name":            worker.Name,
+		"host":            worker.Host,
+		"user":            worker.User,
+		"sshTarget":       worker.EffectiveSSHTarget(),
+		"source":          worker.Source,
+		"dnsName":         worker.DNSName,
+		"tailscaleIPs":    worker.TailscaleIPs,
+		"remoteWorkspace": worker.RemoteWorkspace,
+		"registeredAt":    worker.RegisteredAt,
+		"updatedAt":       worker.UpdatedAt,
 	}
 }
 
@@ -1762,7 +1871,7 @@ func mirrorSetupCommand(opts *options) *cobra.Command {
 				}
 			}
 			if remotePath == "" {
-				remotePath = promptLine(cmd.OutOrStdout(), reader, "Remote destination", mirror.DefaultRemotePath(localRootAbs))
+				remotePath = promptLine(cmd.OutOrStdout(), reader, "Remote destination", defaultMirrorRemotePath(opts.stateDir, selectedWorker, localRootAbs))
 			}
 			profile := mirror.Profile{
 				Name:          name,
@@ -3511,7 +3620,7 @@ func checkedMirrorDestination(cmd *cobra.Command, opts *options, reader *bufio.R
 			return mirror.DestinationCheck{}, output.NewError("MIRROR_DESTINATION_NOT_READY", fmt.Sprintf("%s:%s is not ready: %s", profile.Worker, profile.RemotePath, reason), "Choose a different --remote-path; --force only allows non-empty directories")
 		}
 		output.Warningf(cmd.OutOrStdout(), "destination is not ready: %s", firstNonEmpty(check.NonEmptyReason, check.State))
-		next := promptLine(cmd.OutOrStdout(), reader, "Remote destination", mirror.DefaultRemotePath(profile.LocalRoot))
+		next := promptLine(cmd.OutOrStdout(), reader, "Remote destination", defaultMirrorRemotePath(opts.stateDir, profile.Worker, profile.LocalRoot))
 		profile.RemotePath = next
 		resolved.RemotePath = next
 		normalized, normErr := mirror.Normalize(*profile)
@@ -3673,13 +3782,12 @@ func printMirrorFixReport(w io.Writer, report mirrorFixReport) {
 }
 
 func promptMirrorWorker(w io.Writer, reader *bufio.Reader, stateDir string) (string, error) {
-	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
-	workers, err := store.List()
+	workers, err := workerConfigs(stateDir)
 	if err != nil {
 		return "", output.NewError("WORKER_CONFIG_READ_FAILED", err.Error(), "")
 	}
 	if len(workers) == 0 {
-		return "", output.NewError("WORKER_REQUIRED", "no registered workers are available", "Run workyard workers add <tailscale-device-or-host>")
+		return "", output.NewError("WORKER_REQUIRED", "no registered or configured workers are available", "Run workyard workers add <tailscale-device-or-host> or edit "+globalconfig.DefaultPath(stateDir))
 	}
 	_, _ = fmt.Fprintln(w, "Worker:")
 	for i, worker := range workers {
@@ -3695,6 +3803,16 @@ func promptMirrorWorker(w io.Writer, reader *bufio.Reader, stateDir string) (str
 		}
 		_, _ = fmt.Fprintf(w, "Choose a worker by number or name.\n")
 	}
+}
+
+func defaultMirrorRemotePath(stateDir, worker, localRoot string) string {
+	if resolved, ok, err := resolveWorkerConfig(stateDir, worker); err == nil && ok && strings.TrimSpace(resolved.RemoteWorkspace) != "" {
+		return globalconfig.JoinRemoteWorkspace(resolved.RemoteWorkspace, localRoot)
+	}
+	if loaded, err := globalconfig.LoadDefault(stateDir); err == nil && strings.TrimSpace(loaded.Config.Defaults.RemoteWorkspace) != "" {
+		return globalconfig.JoinRemoteWorkspace(loaded.Config.Defaults.RemoteWorkspace, localRoot)
+	}
+	return mirror.DefaultRemotePath(localRoot)
 }
 
 func promptLine(w io.Writer, reader *bufio.Reader, label, def string) string {
@@ -3891,8 +4009,12 @@ func configCommand(opts *options) *cobra.Command {
 	root := &cobra.Command{Use: "config", Short: "Inspect Workyard config"}
 	check := &cobra.Command{
 		Use:   "check",
-		Short: "Validate workyard.yaml",
+		Short: "Validate workyard.yaml and global config",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			globalLoaded, err := globalconfig.LoadDefault(opts.stateDir)
+			if err != nil {
+				return output.NewError("GLOBAL_CONFIG_INVALID", err.Error(), "Fix "+globalconfig.DefaultPath(opts.stateDir))
+			}
 			loaded, err := config.Load(opts.project)
 			if err != nil {
 				return output.NewError("CONFIG_INVALID", err.Error(), "Run workyard init or fix workyard.yaml")
@@ -3903,20 +4025,55 @@ func configCommand(opts *options) *cobra.Command {
 					warnings = []string{}
 				}
 				type checkResponse struct {
-					OK         bool     `json:"ok"`
-					ConfigPath string   `json:"configPath"`
-					Warnings   []string `json:"warnings"`
+					OK          bool     `json:"ok"`
+					ConfigPath  string   `json:"configPath"`
+					GlobalPath  string   `json:"globalPath"`
+					GlobalFound bool     `json:"globalFound"`
+					Warnings    []string `json:"warnings"`
 				}
-				return output.WriteJSON(cmd.OutOrStdout(), checkResponse{OK: true, ConfigPath: loaded.Config.Path, Warnings: warnings})
+				return output.WriteJSON(cmd.OutOrStdout(), checkResponse{OK: true, ConfigPath: loaded.Config.Path, GlobalPath: globalLoaded.Path, GlobalFound: globalLoaded.Found, Warnings: warnings})
 			}
 			output.OKf(cmd.OutOrStdout(), "%s", loaded.Config.Path)
+			if globalLoaded.Found {
+				output.OKf(cmd.OutOrStdout(), "%s", globalLoaded.Path)
+			}
 			for _, warning := range loaded.Warnings {
 				output.Warningf(cmd.OutOrStdout(), "%s", warning)
 			}
 			return nil
 		},
 	}
-	root.AddCommand(check)
+	show := &cobra.Command{
+		Use:   "show",
+		Short: "Show global Workyard config",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loaded, err := globalconfig.LoadDefault(opts.stateDir)
+			if err != nil {
+				return output.NewError("GLOBAL_CONFIG_INVALID", err.Error(), "Fix "+globalconfig.DefaultPath(opts.stateDir))
+			}
+			workers, err := loaded.Workers()
+			if err != nil {
+				return output.NewError("GLOBAL_CONFIG_INVALID", err.Error(), "Fix "+globalconfig.DefaultPath(opts.stateDir))
+			}
+			if opts.json {
+				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "path": loaded.Path, "found": loaded.Found, "defaults": loaded.Config.Defaults, "workers": workers})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "global config: %s", loaded.Path)
+			if !loaded.Found {
+				_, _ = fmt.Fprint(cmd.OutOrStdout(), " (missing)")
+			}
+			_, _ = fmt.Fprintln(cmd.OutOrStdout())
+			if loaded.Config.Defaults.SSHUser != "" || loaded.Config.Defaults.RemoteWorkspace != "" {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "defaults: ssh_user=%s remote_workspace=%s\n", firstNonEmpty(loaded.Config.Defaults.SSHUser, "-"), firstNonEmpty(loaded.Config.Defaults.RemoteWorkspace, "-"))
+			}
+			rows := make([][]string, 0, len(workers))
+			for _, worker := range workers {
+				rows = append(rows, []string{worker.Name, worker.EffectiveSSHTarget(), firstNonEmpty(worker.RemoteWorkspace, "-")})
+			}
+			return output.WriteTable(cmd.OutOrStdout(), []string{"NAME", "SSH TARGET", "WORKSPACE"}, rows)
+		},
+	}
+	root.AddCommand(check, show)
 	return root
 }
 
@@ -5339,8 +5496,7 @@ func workerCompletions(stateDir string) []string {
 }
 
 func registeredWorkerNames(stateDir string) []string {
-	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
-	registered, err := store.List()
+	registered, err := workerConfigs(stateDir)
 	if err != nil {
 		return nil
 	}

@@ -323,7 +323,33 @@ workers:
     dnsName: linux-builder.tailnet.ts.net
 ```
 
-Registered names can be used anywhere `--worker` is accepted:
+Static SSH workers and cross-tool defaults can also be configured in `~/.workyard/config.toml`. These workers are read-only from `workyard workers add/remove`, show up with `source=config`, and can be used anywhere `--worker` accepts a registered worker name.
+
+```toml
+[defaults]
+ssh_user = "dev"
+remote_workspace = "~/workspace"
+
+[[workers]]
+name = "devbox"
+ssh = "dev@devbox.example.com"
+remote_workspace = "/srv/workspaces"
+
+[[known_hosts]]
+name = "ssh-config-alias"
+ssh = "my-devbox"
+```
+
+`[[workers]]`, `[[known_hosts]]`, and `[[static_hosts]]` are accepted aliases for configured static workers. `ssh` can be a plain SSH config alias, a host, or `user@host`; if `remote_workspace` is set, `workyard mirror setup` uses it when suggesting the default remote destination.
+
+Inspect and validate the global config:
+
+```sh
+workyard config show
+workyard config check
+```
+
+Registered and configured names can be used anywhere `--worker` is accepted:
 
 ```sh
 workyard deploy . --worker linux-builder --fresh
@@ -537,7 +563,7 @@ Watch mode uses filesystem events when available and falls back to polling with 
 
 ## Mirror Workflow
 
-Mirror keeps registered local directories reflected on workers without requiring a `workyard.yaml` service config. It is useful when you want to SSH into a Tailscale-connected device and find a normal workspace directory with your latest local edits.
+Mirror keeps registered local directories reflected on workers without requiring a `workyard.yaml` service config. It is useful when you want to SSH into a Tailscale-connected device or a static SSH dev box and find a normal workspace directory with your latest local edits.
 
 Configure a mirror with the wizard:
 
@@ -548,8 +574,8 @@ workyard mirror setup
 The wizard asks for:
 
 - Local directory, defaulting to the current directory.
-- Registered worker.
-- Remote destination, defaulting to `~/workspace/<directory-name>`.
+- Registered or globally configured worker.
+- Remote destination, defaulting to `<remote_workspace>/<directory-name>` when configured, otherwise `~/workspace/<directory-name>`.
 - Exclude presets, auto-detected by default from repository files.
 - Confirmation before writing the local mirror registry.
 
@@ -765,6 +791,7 @@ Project commands:
 ```sh
 workyard init
 workyard config check
+workyard config show
 workyard services
 workyard --worker user@worker-host sync
 workyard --worker user@worker-host setup

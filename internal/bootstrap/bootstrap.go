@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackbelluche/workyard/internal/doctor"
+	"github.com/jackbelluche/workyard/internal/globalconfig"
 	"github.com/jackbelluche/workyard/internal/registry"
 	"github.com/jackbelluche/workyard/internal/remote"
 )
@@ -81,7 +82,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	resolved, err := ResolveWorker(opts.Worker, cfg, registry.DefaultWorkersPath(opts.StateDir))
+	resolved, err := ResolveWorkerWithGlobal(opts.Worker, cfg, registry.DefaultWorkersPath(opts.StateDir), globalconfig.DefaultPath(opts.StateDir))
 	if err != nil {
 		return Report{}, err
 	}
@@ -219,6 +220,14 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 }
 
 func ResolveWorker(name string, cfg Config, workerConfigPath string) (resolvedWorker, error) {
+	return resolveWorker(name, cfg, workerConfigPath, "")
+}
+
+func ResolveWorkerWithGlobal(name string, cfg Config, workerConfigPath, globalConfigPath string) (resolvedWorker, error) {
+	return resolveWorker(name, cfg, workerConfigPath, globalConfigPath)
+}
+
+func resolveWorker(name string, cfg Config, workerConfigPath, globalConfigPath string) (resolvedWorker, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return resolvedWorker{}, errors.New("worker name is required")
@@ -239,6 +248,27 @@ func ResolveWorker(name string, cfg Config, workerConfigPath string) (resolvedWo
 			Target: worker.EffectiveSSHTarget(),
 			Source: "registry",
 		}, nil
+	}
+	if strings.TrimSpace(globalConfigPath) != "" {
+		loaded, err := globalconfig.Load(globalConfigPath)
+		if err != nil {
+			return resolvedWorker{}, err
+		}
+		workers, err := loaded.Workers()
+		if err != nil {
+			return resolvedWorker{}, err
+		}
+		for _, worker := range workers {
+			if worker.Name == name || worker.Host == name || worker.EffectiveSSHTarget() == name || strings.TrimSuffix(strings.TrimSpace(worker.DNSName), ".") == name {
+				return resolvedWorker{
+					Name:   worker.Name,
+					Host:   worker.Host,
+					User:   worker.User,
+					Target: worker.EffectiveSSHTarget(),
+					Source: "global-config",
+				}, nil
+			}
+		}
 	}
 	user, host, hasUser := splitTarget(name)
 	if !hasUser {

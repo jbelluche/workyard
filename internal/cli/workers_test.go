@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -51,6 +53,27 @@ func TestWorkerKeysMatchShortDNSAndSSHTargetHost(t *testing.T) {
 	}
 }
 
+func TestMergeWorkerConfigsDropsReplacedKeys(t *testing.T) {
+	registered := []registry.WorkerConfig{
+		{Name: "devbox", Host: "old.example.com", User: "dev", Source: "manual"},
+	}
+	configured := []registry.WorkerConfig{
+		{Name: "devbox", Host: "new.example.com", User: "dev", Source: "config"},
+		{Name: "oldbox", Host: "old.example.com", User: "dev", Source: "config"},
+	}
+	merged := mergeWorkerConfigs(registered, configured)
+	if len(merged) != 2 {
+		t.Fatalf("merged=%#v, want two workers", merged)
+	}
+	byName := map[string]string{}
+	for _, worker := range merged {
+		byName[worker.Name] = worker.EffectiveSSHTarget()
+	}
+	if byName["devbox"] != "dev@new.example.com" || byName["oldbox"] != "dev@old.example.com" {
+		t.Fatalf("unexpected merge result: %#v", merged)
+	}
+}
+
 func TestTailscaleDeviceFromPeerUsesHostName(t *testing.T) {
 	device := tailscaleDeviceFromPeer(tailscalePeerStatus{
 		DNSName:      "linux-builder.tailnet.ts.net.",
@@ -70,6 +93,23 @@ func TestResolveWorkerTargetPreservesLocalhost(t *testing.T) {
 	}
 	if got != registry.LocalWorkerName {
 		t.Fatalf("worker=%q, want %q", got, registry.LocalWorkerName)
+	}
+}
+
+func TestResolveWorkerTargetUsesGlobalConfigWorker(t *testing.T) {
+	stateDir := t.TempDir()
+	writeGlobalConfig(t, stateDir, `
+[[workers]]
+name = "devbox"
+ssh = "jack@devbox.example.com"
+remote_workspace = "/srv/workspaces"
+`)
+	got, err := resolveWorkerTarget(stateDir, "devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "jack@devbox.example.com" {
+		t.Fatalf("target=%q, want static host target", got)
 	}
 }
 
@@ -104,6 +144,32 @@ func TestWorkerListRowsIncludesBuiltinLocalhost(t *testing.T) {
 	t.Fatalf("localhost row missing from %#v", rows)
 }
 
+func TestWorkerListRowsIncludesGlobalConfigWorker(t *testing.T) {
+	stateDir := t.TempDir()
+	writeGlobalConfig(t, stateDir, `
+[defaults]
+ssh_user = "dev"
+remote_workspace = "/srv/workspaces"
+
+[[known_hosts]]
+name = "devbox"
+host = "devbox.example.com"
+`)
+	rows, err := workerListRows(&options{stateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Name == "devbox" {
+			if row.Source != "config" || row.SSHTarget != "dev@devbox.example.com" || row.RemoteWorkspace != "/srv/workspaces" {
+				t.Fatalf("unexpected global worker row: %#v", row)
+			}
+			return
+		}
+	}
+	t.Fatalf("devbox row missing from %#v", rows)
+}
+
 func TestWorkerRequiredHintListsRegisteredWorkers(t *testing.T) {
 	stateDir := t.TempDir()
 	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
@@ -127,6 +193,23 @@ func TestWorkerRequiredHintListsRegisteredWorkers(t *testing.T) {
 	}
 }
 
+func TestWorkerRequiredHintListsGlobalConfigWorkers(t *testing.T) {
+	stateDir := t.TempDir()
+	writeGlobalConfig(t, stateDir, `
+[[workers]]
+name = "devbox"
+ssh = "jack@devbox.example.com"
+`)
+	err := requireWorker(&options{stateDir: stateDir}, "status")
+	if err == nil {
+		t.Fatal("expected missing worker to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce == nil || !strings.Contains(ce.Hint, "devbox") {
+		t.Fatalf("hint %q missing devbox", ce.Hint)
+	}
+}
+
 func TestWorkerCompletionsIncludeLocalhostAndRegisteredNames(t *testing.T) {
 	stateDir := t.TempDir()
 	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
@@ -145,6 +228,64 @@ func TestWorkerCompletionsIncludeLocalhostAndRegisteredNames(t *testing.T) {
 	}
 }
 
+func TestWorkerCompletionsIncludeGlobalConfigNames(t *testing.T) {
+	stateDir := t.TempDir()
+	writeGlobalConfig(t, stateDir, `
+[[workers]]
+name = "devbox"
+ssh = "jack@devbox.example.com"
+`)
+	got := workerCompletions(stateDir)
+	want := []string{registry.LocalWorkerName, "devbox"}
+	if len(got) != len(want) {
+		t.Fatalf("completions=%#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("completions=%#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestDefaultMirrorRemotePathUsesGlobalWorkerWorkspace(t *testing.T) {
+	stateDir := t.TempDir()
+	writeGlobalConfig(t, stateDir, `
+[defaults]
+remote_workspace = "~/workspace"
+
+[[workers]]
+name = "devbox"
+ssh = "jack@devbox.example.com"
+remote_workspace = "/srv/workspaces"
+`)
+	got := defaultMirrorRemotePath(stateDir, "devbox", "/Users/dev/workyard")
+	if got != "/srv/workspaces/workyard" {
+		t.Fatalf("remote path=%q, want configured workspace", got)
+	}
+}
+
+func TestWorkersRemoveRefusesGlobalConfigWorker(t *testing.T) {
+	stateDir := t.TempDir()
+	writeGlobalConfig(t, stateDir, `
+[[workers]]
+name = "devbox"
+ssh = "jack@devbox.example.com"
+`)
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "workers", "remove", "devbox"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected remove to fail for global config worker")
+	}
+	ce := output.AsCommandError(err)
+	if ce == nil || ce.Code != "WORKER_CONFIG_READONLY" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLifecycleCommandRequiresExplicitWorker(t *testing.T) {
 	opts := &options{}
 	root := newRoot(opts)
@@ -157,5 +298,15 @@ func TestLifecycleCommandRequiresExplicitWorker(t *testing.T) {
 	}
 	if ce := output.AsCommandError(err); ce.Code != "WORKER_REQUIRED" {
 		t.Fatalf("code=%q, want WORKER_REQUIRED", ce.Code)
+	}
+}
+
+func writeGlobalConfig(t *testing.T, stateDir, body string) {
+	t.Helper()
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

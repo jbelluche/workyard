@@ -19,15 +19,16 @@ const (
 )
 
 type WorkerConfig struct {
-	Name         string    `yaml:"name" json:"name"`
-	Host         string    `yaml:"host" json:"host"`
-	User         string    `yaml:"user" json:"user"`
-	SSHTarget    string    `yaml:"sshTarget,omitempty" json:"sshTarget,omitempty"`
-	Source       string    `yaml:"source,omitempty" json:"source,omitempty"`
-	DNSName      string    `yaml:"dnsName,omitempty" json:"dnsName,omitempty"`
-	TailscaleIPs []string  `yaml:"tailscaleIPs,omitempty" json:"tailscaleIPs,omitempty"`
-	RegisteredAt time.Time `yaml:"registeredAt" json:"registeredAt"`
-	UpdatedAt    time.Time `yaml:"updatedAt" json:"updatedAt"`
+	Name            string    `yaml:"name" json:"name"`
+	Host            string    `yaml:"host" json:"host"`
+	User            string    `yaml:"user" json:"user"`
+	SSHTarget       string    `yaml:"sshTarget,omitempty" json:"sshTarget,omitempty"`
+	Source          string    `yaml:"source,omitempty" json:"source,omitempty"`
+	DNSName         string    `yaml:"dnsName,omitempty" json:"dnsName,omitempty"`
+	TailscaleIPs    []string  `yaml:"tailscaleIPs,omitempty" json:"tailscaleIPs,omitempty"`
+	RemoteWorkspace string    `yaml:"remoteWorkspace,omitempty" json:"remoteWorkspace,omitempty"`
+	RegisteredAt    time.Time `yaml:"registeredAt" json:"registeredAt"`
+	UpdatedAt       time.Time `yaml:"updatedAt" json:"updatedAt"`
 }
 
 type WorkersFile struct {
@@ -250,6 +251,10 @@ func validateWorkerConfig(worker WorkerConfig) error {
 		return fmt.Errorf("sshTarget contains invalid characters")
 	}
 	return nil
+}
+
+func ValidateWorkerConfig(worker WorkerConfig) error {
+	return validateWorkerConfig(worker)
 }
 
 func (w WorkerConfig) EffectiveSSHTarget() string {
