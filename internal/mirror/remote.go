@@ -3,6 +3,7 @@ package mirror
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,6 +52,7 @@ type Marker struct {
 	LocalRoot       string    `json:"localRoot"`
 	Worker          string    `json:"worker"`
 	RemotePath      string    `json:"remotePath"`
+	DestinationID   string    `json:"destinationId,omitempty"`
 	WorkyardVersion string    `json:"workyardVersion"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
@@ -118,7 +120,15 @@ func CheckDestination(ctx context.Context, profile Profile) (DestinationCheck, e
 			check.NonEmptyReason = "destination contains a marker for a different mirror"
 		}
 	case "non-empty":
-		check.NonEmptyReason = "destination contains existing files"
+		if marker, err := ReadMarker(ctx, profile.Worker, resolved); err == nil {
+			check.Marker = &marker
+			check.OK = MarkerMatches(marker, profile)
+			if !check.OK {
+				check.NonEmptyReason = "destination marker belongs to a different mirror"
+			}
+		} else {
+			check.NonEmptyReason = "destination contains existing files"
+		}
 	case "symlink":
 		check.NonEmptyReason = "destination is a symlink"
 	case "not-directory":
@@ -240,6 +250,10 @@ func Sync(ctx context.Context, profile Profile, opts SyncOptions) (SyncResult, e
 
 func WriteMarker(ctx context.Context, profile Profile, resolvedPath, version string) error {
 	now := time.Now().UTC()
+	destinationID, err := destinationIdentity(ctx, profile.Worker, resolvedPath)
+	if err != nil {
+		return err
+	}
 	existing, err := ReadMarker(ctx, profile.Worker, resolvedPath)
 	if err == nil && !existing.CreatedAt.IsZero() {
 		existing.ID = profile.ID
@@ -249,10 +263,10 @@ func WriteMarker(ctx context.Context, profile Profile, resolvedPath, version str
 		existing.WorkyardVersion = version
 		existing.LocalRoot = profile.LocalRoot
 		existing.RemotePath = profile.RemotePath
+		existing.DestinationID = destinationID
 		data, _ := json.MarshalIndent(existing, "", "  ")
 		data = append(data, '\n')
-		_, err = remote.Run(ctx, profile.Worker, []string{"sh", "-lc", "cat > " + remote.ShellQuote(path.Join(resolvedPath, MarkerFileName))}, data, 10*time.Second)
-		return err
+		return writeMarkerData(ctx, profile.Worker, resolvedPath, data)
 	}
 	marker := Marker{
 		ID:              profile.ID,
@@ -260,26 +274,19 @@ func WriteMarker(ctx context.Context, profile Profile, resolvedPath, version str
 		LocalRoot:       profile.LocalRoot,
 		Worker:          profile.Worker,
 		RemotePath:      profile.RemotePath,
+		DestinationID:   destinationID,
 		WorkyardVersion: version,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
 	data, _ := json.MarshalIndent(marker, "", "  ")
 	data = append(data, '\n')
-	_, err = remote.Run(ctx, profile.Worker, []string{"sh", "-lc", "cat > " + remote.ShellQuote(path.Join(resolvedPath, MarkerFileName))}, data, 10*time.Second)
-	return err
+	return writeMarkerData(ctx, profile.Worker, resolvedPath, data)
 }
 
 func ReadMarker(ctx context.Context, worker, resolvedPath string) (Marker, error) {
-	out, err := remote.Run(ctx, worker, []string{"cat", path.Join(resolvedPath, MarkerFileName)}, nil, 10*time.Second)
-	if err != nil {
-		return Marker{}, err
-	}
-	var marker Marker
-	if err := json.Unmarshal([]byte(out.Stdout), &marker); err != nil {
-		return Marker{}, err
-	}
-	return marker, nil
+	marker, _, _, err := readMarker(ctx, worker, resolvedPath)
+	return marker, err
 }
 
 func DeleteRemote(ctx context.Context, profile Profile) (string, error) {
@@ -291,20 +298,30 @@ func DeleteRemote(ctx context.Context, profile Profile) (string, error) {
 	if err := ValidateResolvedRemotePath(home, resolved); err != nil {
 		return "", err
 	}
-	marker, err := ReadMarker(ctx, profile.Worker, resolved)
+	marker, markerPath, _, err := readMarker(ctx, profile.Worker, resolved)
 	if err != nil {
 		return "", fmt.Errorf("refusing to delete remote path without a Workyard mirror marker: %w", err)
 	}
 	if !MarkerMatches(marker, profile) {
 		return "", fmt.Errorf("refusing to delete remote path; marker belongs to mirror %q from %s", marker.Name, marker.LocalRoot)
 	}
+	if marker.DestinationID != "" {
+		currentID, err := destinationIdentity(ctx, profile.Worker, resolved)
+		if err != nil {
+			return "", fmt.Errorf("refusing to delete remote path; could not verify destination identity: %w", err)
+		}
+		if currentID != marker.DestinationID {
+			return "", fmt.Errorf("refusing to delete remote path; destination identity changed since the marker was written")
+		}
+	}
 	script := strings.Join([]string{
 		"set -eu",
 		"dest=" + remote.ShellQuote(resolved),
-		"marker=\"$dest/" + MarkerFileName + "\"",
+		"marker=" + remote.ShellQuote(markerPath),
 		"if [ -L \"$dest\" ] || [ -L \"$marker\" ]; then printf 'refusing symlink mirror path\\n' >&2; exit 1; fi",
 		"if [ ! -f \"$marker\" ]; then printf 'missing mirror marker\\n' >&2; exit 1; fi",
 		"rm -rf -- \"$dest\"",
+		"rm -f -- \"$marker\"",
 	}, "\n")
 	if _, err := remote.Run(ctx, profile.Worker, []string{"sh", "-lc", script}, nil, 30*time.Second); err != nil {
 		return "", err
@@ -317,6 +334,81 @@ func MarkerMatches(marker Marker, profile Profile) bool {
 		return marker.ID == profile.ID
 	}
 	return marker.Name == profile.Name && marker.LocalRoot == profile.LocalRoot
+}
+
+func readMarker(ctx context.Context, worker, resolvedPath string) (Marker, string, bool, error) {
+	paths := []struct {
+		path   string
+		legacy bool
+	}{
+		{path: markerPath(resolvedPath)},
+		{path: legacyMarkerPath(resolvedPath), legacy: true},
+	}
+	var lastErr error
+	for _, candidate := range paths {
+		out, err := remote.Run(ctx, worker, []string{"cat", candidate.path}, nil, 10*time.Second)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var marker Marker
+		if err := json.Unmarshal([]byte(out.Stdout), &marker); err != nil {
+			return Marker{}, candidate.path, candidate.legacy, err
+		}
+		return marker, candidate.path, candidate.legacy, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("marker not found")
+	}
+	return Marker{}, "", false, lastErr
+}
+
+func writeMarkerData(ctx context.Context, worker, resolvedPath string, data []byte) error {
+	marker := markerPath(resolvedPath)
+	legacy := legacyMarkerPath(resolvedPath)
+	script := strings.Join([]string{
+		"set -eu",
+		"marker=" + remote.ShellQuote(marker),
+		"marker_dir=$(dirname \"$marker\")",
+		"legacy=" + remote.ShellQuote(legacy),
+		"if [ -L \"$marker_dir\" ] || [ -L \"$marker\" ] || [ -L \"$legacy\" ]; then printf 'refusing symlink mirror marker path\\n' >&2; exit 1; fi",
+		"mkdir -p \"$marker_dir\"",
+		"chmod go-rwx \"$marker_dir\"",
+		"tmp=\"$marker.$$\"",
+		"cat > \"$tmp\"",
+		"chmod go-rwx \"$tmp\"",
+		"mv -f \"$tmp\" \"$marker\"",
+		"if [ -f \"$legacy\" ]; then rm -f -- \"$legacy\"; fi",
+	}, "\n")
+	_, err := remote.Run(ctx, worker, []string{"sh", "-lc", script}, data, 10*time.Second)
+	return err
+}
+
+func markerPath(resolvedPath string) string {
+	clean := path.Clean(resolvedPath)
+	sum := sha256.Sum256([]byte(clean))
+	return path.Join(path.Dir(clean), ".workyard-mirrors", fmt.Sprintf("%s-%x.json", path.Base(clean), sum[:6]))
+}
+
+func legacyMarkerPath(resolvedPath string) string {
+	return path.Join(resolvedPath, MarkerFileName)
+}
+
+func destinationIdentity(ctx context.Context, worker, resolvedPath string) (string, error) {
+	script := strings.Join([]string{
+		"set -eu",
+		"dest=" + remote.ShellQuote(resolvedPath),
+		"(stat -c '%d:%i' \"$dest\" 2>/dev/null || stat -f '%d:%i' \"$dest\" 2>/dev/null)",
+	}, "\n")
+	out, err := remote.Run(ctx, worker, []string{"sh", "-lc", script}, nil, 10*time.Second)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(out.Stdout)
+	if id == "" {
+		return "", fmt.Errorf("empty destination identity")
+	}
+	return id, nil
 }
 
 func ResolveRemotePath(home, value string) string {

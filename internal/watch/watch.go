@@ -15,8 +15,9 @@ import (
 var defaultExcludes = []string{".git", "node_modules", ".workyard", ".workyard-fixture", "__pycache__", ".next", ".turbo", "dist", "build", "coverage"}
 
 type Spec struct {
-	Service string
-	Watch   config.WatchConfig
+	Service    string
+	Watch      config.WatchConfig
+	IncludeGit bool
 }
 
 type FileState struct {
@@ -39,12 +40,12 @@ func Snapshot(root string, specs []Spec) (map[string]FileState, error) {
 				}
 				rel = filepath.ToSlash(rel)
 				if entry.IsDir() {
-					if rel != "." && excluded(rel, spec.Watch.Exclude) {
+					if rel != "." && excluded(rel, spec.Watch.Exclude, spec.IncludeGit) {
 						return filepath.SkipDir
 					}
 					return nil
 				}
-				if !included(rel, spec.Watch.Include) || excluded(rel, spec.Watch.Exclude) {
+				if !included(rel, spec.Watch.Include) || excluded(rel, spec.Watch.Exclude, spec.IncludeGit) {
 					return nil
 				}
 				info, err := entry.Info()
@@ -180,7 +181,7 @@ func addWatchTree(w *fsnotify.Watcher, root, base string, specs []Spec) error {
 		}
 		rel = filepath.ToSlash(rel)
 		for _, spec := range specs {
-			if rel != "." && excluded(rel, spec.Watch.Exclude) {
+			if rel != "." && excluded(rel, spec.Watch.Exclude, spec.IncludeGit) {
 				return filepath.SkipDir
 			}
 		}
@@ -196,7 +197,7 @@ func eventMatches(root, path string, specs []Spec) bool {
 	}
 	rel = filepath.ToSlash(rel)
 	for _, spec := range specs {
-		if included(rel, spec.Watch.Include) && !excluded(rel, spec.Watch.Exclude) {
+		if included(rel, spec.Watch.Include) && !excluded(rel, spec.Watch.Exclude, spec.IncludeGit) {
 			return true
 		}
 	}
@@ -229,13 +230,31 @@ func included(rel string, patterns []string) bool {
 	return false
 }
 
-func excluded(rel string, patterns []string) bool {
-	for _, pattern := range append(defaultExcludes, patterns...) {
+func excluded(rel string, patterns []string, includeGit bool) bool {
+	defaults := defaultExcludes
+	if includeGit {
+		defaults = defaultExcludesWithout(".git")
+	}
+	for _, pattern := range append(defaults, patterns...) {
 		if matchPattern(pattern, rel) {
 			return true
 		}
 	}
 	return false
+}
+
+func defaultExcludesWithout(names ...string) []string {
+	skip := map[string]bool{}
+	for _, name := range names {
+		skip[name] = true
+	}
+	out := make([]string, 0, len(defaultExcludes))
+	for _, item := range defaultExcludes {
+		if !skip[item] {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func matchPattern(pattern, rel string) bool {

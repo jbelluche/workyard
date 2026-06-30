@@ -168,6 +168,20 @@ func TestValidateResolvedRemotePathRejectsBroadPaths(t *testing.T) {
 	}
 }
 
+func TestMarkerPathLivesOutsideMirrorDestination(t *testing.T) {
+	dest := "/home/dev/workspace/workyard"
+	got := markerPath(dest)
+	if strings.HasPrefix(got, dest+"/") {
+		t.Fatalf("marker path %q is inside destination %q", got, dest)
+	}
+	if !strings.HasPrefix(got, "/home/dev/workspace/.workyard-mirrors/") {
+		t.Fatalf("marker path=%q, want sidecar under workspace parent", got)
+	}
+	if legacyMarkerPath(dest) != "/home/dev/workspace/workyard/.workyard-mirror.json" {
+		t.Fatalf("unexpected legacy marker path: %q", legacyMarkerPath(dest))
+	}
+}
+
 func TestWriteExcludeFileHonorsIncludeGit(t *testing.T) {
 	root := t.TempDir()
 	local := filepath.Join(root, "project")

@@ -226,7 +226,8 @@ func Run(ctx context.Context, profiles []Profile, opts RunOptions) error {
 
 func runProfile(ctx context.Context, profile Profile, opts RunOptions, state *StateStore) error {
 	spec := watcher.Spec{
-		Service: profile.Name,
+		Service:    profile.Name,
+		IncludeGit: profile.IncludeGit,
 		Watch: config.WatchConfig{
 			Paths:    []string{"."},
 			Exclude:  profile.Exclude,

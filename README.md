@@ -129,7 +129,7 @@ The wizard asks for the local directory, worker, remote destination, exclude pre
 Sync once and open a remote shell:
 
 ```sh
-workyard mirror --once
+workyard mirror sync
 workyard mirror shell --auto
 ```
 
@@ -559,6 +559,13 @@ Run all enabled mirrors in the current terminal:
 workyard mirror
 ```
 
+Sync once and exit:
+
+```sh
+workyard mirror sync
+workyard mirror sync <name-or-id>
+```
+
 Foreground mirroring prints each sync:
 
 ```text
@@ -645,7 +652,7 @@ workyard mirror delete <name-or-id>
 
 Each mirror has a stable short ID shown in `mirror list`. Commands accept a name when exactly one mirror has that name; if several mirrors share a name, Workyard asks you to use one of the IDs.
 
-`mirror setup` requires the remote destination to be missing, empty, or already marked as the same Workyard mirror. Use `--force` only when you intentionally want to mirror into a non-empty directory. Mirror syncs use default excludes such as `node_modules`, build outputs, logs, and `.env` files; `.git` is included by default so the remote workspace behaves like a clone.
+`mirror setup` requires the remote destination to be missing, empty, or already marked as the same Workyard mirror. Use `--force` only when you intentionally want to mirror into a non-empty directory. Mirror syncs use default excludes such as `node_modules`, build outputs, logs, and `.env` files; `.git` is included by default so the remote workspace behaves like a clone. Continuous mirror mode watches `.git` for mirrors that include git, so local commits update the worker's git state without restarting the mirror.
 
 Mirror setup uses `--preset auto` by default. Auto detection looks for common repository files such as `package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `pom.xml`, `*.csproj`, and `Gemfile`, then adds generated/cache excludes for the detected ecosystems. Override it with explicit presets or disable it:
 
@@ -656,7 +663,7 @@ workyard mirror setup --preset none
 
 `workyard mirror doctor` checks local source readability, local and remote `rsync`, SSH connectivity, destination safety and marker ownership, and stored presets. `--fix` applies only safe repairs: removing stale local mirror pid files, creating missing destinations, and securing destinations that are empty or already marked as the same mirror. It skips non-empty unmarked paths, symlinks, files, and mismatched markers.
 
-Deleting a mirror only removes the local registry record by default. To remove the remote files too, pass `--delete-remote`; Workyard will refuse unless the destination contains a matching `.workyard-mirror.json` marker written by mirror sync:
+Deleting a mirror only removes the local registry record by default. To remove the remote files too, pass `--delete-remote`; Workyard will refuse unless the worker has a matching Workyard mirror marker for that destination. Markers are stored outside the mirrored directory so they do not show up in remote `git status`:
 
 ```sh
 workyard mirror delete <name> --delete-remote
@@ -727,6 +734,8 @@ Mirror commands:
 ```sh
 workyard mirror setup
 workyard mirror
+workyard mirror sync
+workyard mirror sync <id>
 workyard mirror --once
 workyard mirror --verbose
 workyard mirror start

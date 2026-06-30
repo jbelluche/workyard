@@ -127,6 +127,40 @@ func TestMirrorListShowsIDColumn(t *testing.T) {
 	}
 }
 
+func TestMirrorSyncFailsWithoutConfiguredMirrors(t *testing.T) {
+	stateDir := t.TempDir()
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "sync"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected sync without mirrors to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_NONE_CONFIGURED" {
+		t.Fatalf("code=%q, want MIRROR_NONE_CONFIGURED", ce.Code)
+	}
+}
+
+func TestMirrorSyncUnknownRefFailsBeforeSync(t *testing.T) {
+	stateDir, _ := writeMirrorConflictRegistry(t)
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "sync", "missing"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected unknown sync ref to fail")
+	}
+	ce := output.AsCommandError(err)
+	if ce.Code != "MIRROR_NOT_FOUND" {
+		t.Fatalf("code=%q, want MIRROR_NOT_FOUND", ce.Code)
+	}
+}
+
 func TestMirrorDeleteByIDWhenNameIsAmbiguous(t *testing.T) {
 	stateDir, firstID := writeMirrorConflictRegistry(t)
 	root := newRoot(&options{})

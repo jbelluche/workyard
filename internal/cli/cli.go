@@ -1700,7 +1700,7 @@ func mirrorCommand(opts *options) *cobra.Command {
 	}
 	root.Flags().BoolVar(&once, "once", false, "sync enabled mirrors once and exit")
 	root.Flags().DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "fallback polling interval")
-	root.AddCommand(mirrorHelpCommand(), mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorRenameCommand(opts), mirrorDoctorCommand(opts), mirrorShellCommand(opts), mirrorExecCommand(opts), mirrorServicesCommand(opts), mirrorTmuxCommand(opts), mirrorDeleteCommand(opts))
+	root.AddCommand(mirrorHelpCommand(), mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorSyncCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorRenameCommand(opts), mirrorDoctorCommand(opts), mirrorShellCommand(opts), mirrorExecCommand(opts), mirrorServicesCommand(opts), mirrorTmuxCommand(opts), mirrorDeleteCommand(opts))
 	return root
 }
 
@@ -1835,6 +1835,43 @@ func mirrorListCommand(opts *options) *cobra.Command {
 				rows = append(rows, []string{profile.ID, profile.Name, fmt.Sprint(profile.Enabled), profile.Worker, strings.Join(profile.Presets, ","), profile.LocalRoot, profile.RemotePath, formatTime(profile.UpdatedAt)})
 			}
 			return output.WriteTable(cmd.OutOrStdout(), []string{"ID", "NAME", "ENABLED", "WORKER", "PRESETS", "LOCAL", "REMOTE", "UPDATED"}, rows)
+		},
+	}
+}
+
+func mirrorSyncCommand(opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync [name-or-id]",
+		Short: "Sync configured mirrors once",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store := mirror.NewStore(mirror.DefaultPath(opts.stateDir))
+			var profiles []mirror.Profile
+			if len(args) == 1 {
+				profile, ok, err := store.Get(args[0])
+				if err != nil {
+					return mirrorRefCommandError(err)
+				}
+				if !ok {
+					return output.NewError("MIRROR_NOT_FOUND", fmt.Sprintf("mirror %q was not found", args[0]), "Run workyard mirror list")
+				}
+				profile.Enabled = true
+				profiles = []mirror.Profile{profile}
+			} else {
+				var err error
+				profiles, err = store.List()
+				if err != nil {
+					return output.NewError("MIRROR_REGISTRY_READ_FAILED", err.Error(), "")
+				}
+				if mirrorEnabledCount(profiles) == 0 {
+					return mirrorNoEnabledConfiguredError(profiles)
+				}
+			}
+			profiles, err := resolveMirrorProfiles(opts.stateDir, profiles)
+			if err != nil {
+				return output.NewError("MIRROR_WORKER_INVALID", err.Error(), "Run workyard workers list")
+			}
+			return runMirrorOnce(cmd, opts, profiles)
 		},
 	}
 }
@@ -2969,31 +3006,46 @@ func runMirrorForeground(cmd *cobra.Command, opts *options, once bool, pollInter
 	if !opts.quiet {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "mirroring %d profile(s)\n", enabled)
 	}
-	if err := mirror.Run(cmd.Context(), profiles, mirror.RunOptions{
+	if err := runMirror(cmd, opts, profiles, mirror.RunOptions{
 		StateDir:     opts.stateDir,
 		Version:      Version,
 		Once:         once,
 		PollInterval: pollInterval,
-		OnResult: func(res mirror.SyncResult) {
-			if opts.json {
-				_ = output.WriteJSONLine(cmd.OutOrStdout(), res)
-				return
-			}
-			if !opts.quiet {
-				printMirrorSyncResult(cmd.OutOrStdout(), res, opts.verbose)
-			}
-		},
-		OnError: func(profile mirror.Profile, err error) {
-			if opts.json {
-				_ = output.WriteJSONLine(cmd.OutOrStdout(), map[string]any{"ok": false, "name": profile.Name, "worker": profile.Worker, "error": err.Error()})
-				return
-			}
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "mirror %s error: %s\n", profile.Name, err)
-		},
 	}); err != nil {
 		return output.NewError("MIRROR_FAILED", err.Error(), "Run workyard mirror status")
 	}
 	return nil
+}
+
+func runMirrorOnce(cmd *cobra.Command, opts *options, profiles []mirror.Profile) error {
+	if err := runMirror(cmd, opts, profiles, mirror.RunOptions{
+		StateDir: opts.stateDir,
+		Version:  Version,
+		Once:     true,
+	}); err != nil {
+		return output.NewError("MIRROR_FAILED", err.Error(), "Run workyard mirror status")
+	}
+	return nil
+}
+
+func runMirror(cmd *cobra.Command, opts *options, profiles []mirror.Profile, runOpts mirror.RunOptions) error {
+	runOpts.OnResult = func(res mirror.SyncResult) {
+		if opts.json {
+			_ = output.WriteJSONLine(cmd.OutOrStdout(), res)
+			return
+		}
+		if !opts.quiet {
+			printMirrorSyncResult(cmd.OutOrStdout(), res, opts.verbose)
+		}
+	}
+	runOpts.OnError = func(profile mirror.Profile, err error) {
+		if opts.json {
+			_ = output.WriteJSONLine(cmd.OutOrStdout(), map[string]any{"ok": false, "name": profile.Name, "worker": profile.Worker, "error": err.Error()})
+			return
+		}
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "mirror %s error: %s\n", profile.Name, err)
+	}
+	return mirror.Run(cmd.Context(), profiles, runOpts)
 }
 
 type mirrorPrepareMode int

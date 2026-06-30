@@ -47,6 +47,48 @@ func TestSnapshotHonorsIncludeExclude(t *testing.T) {
 	}
 }
 
+func TestSnapshotCanIncludeGitForMirrors(t *testing.T) {
+	root := t.TempDir()
+	write := func(path, body string) {
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".git/HEAD", "ref: refs/heads/main")
+	write("app/server.go", "package main")
+
+	got, err := Snapshot(root, []Spec{{
+		Service:    "mirror",
+		IncludeGit: true,
+		Watch: config.WatchConfig{
+			Paths: []string{"."},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got[".git/HEAD"]; !ok {
+		t.Fatalf("expected .git/HEAD in snapshot: %#v", got)
+	}
+
+	got, err = Snapshot(root, []Spec{{
+		Service: "service",
+		Watch: config.WatchConfig{
+			Paths: []string{"."},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got[".git/HEAD"]; ok {
+		t.Fatalf("did not expect .git/HEAD in default snapshot: %#v", got)
+	}
+}
+
 func TestChangedDetectsContentChange(t *testing.T) {
 	before := map[string]FileState{"x": {Size: 1}}
 	after := map[string]FileState{"x": {Size: 2}}
