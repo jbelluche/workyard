@@ -1,0 +1,167 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, such as v0.1.0. Manual runs build artifacts but do not publish a GitHub Release."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check shell scripts
+        run: sh -n scripts/install.sh scripts/build-release.sh scripts/local/install.sh scripts/local/uninstall.sh fixtures/multi-service/scripts/*.sh
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Validate fixture configs
+        run: |
+          go run ./cmd/workyard config check --project fixtures/health-server
+          go run ./cmd/workyard config check --project fixtures/multi-service
+
+  build:
+    name: Build Release Artifacts
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must look like v0.1.0 or v0.1.0-rc.1, got: $version" >&2
+            exit 2
+          fi
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build release artifacts
+        run: VERSION="${{ steps.version.outputs.version }}" scripts/build-release.sh
+
+      - name: Verify release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist/release
+          expected=(
+            workyard-darwin-amd64
+            workyard-darwin-arm64
+            workyard-linux-amd64
+            workyard-linux-arm64
+          )
+          for name in "${expected[@]}"; do
+            archive="${name}.tar.gz"
+            test -f "$archive"
+            tar -tzf "$archive" | grep -Fx "$name" >/dev/null
+            grep -F "  $archive" checksums.txt >/dev/null
+          done
+          test -f manifest.json
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          cat > dist/release/release-notes.md <<NOTES
+          ## Workyard ${version}
+
+          Install:
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | WORKYARD_VERSION=${version} sh
+          \`\`\`
+
+          Assets include macOS and Linux binaries for amd64 and arm64, plus SHA-256 checksums and a manifest.
+          NOTES
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: workyard-release-${{ steps.version.outputs.version }}
+          path: |
+            dist/release/*.tar.gz
+            dist/release/checksums.txt
+            dist/release/manifest.json
+            dist/release/release-notes.md
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: workyard-release-${{ needs.build.outputs.version }}
+          path: dist/release
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.version }}
+          name: Workyard ${{ needs.build.outputs.version }}
+          body_path: dist/release/release-notes.md
+          files: |
+            dist/release/*.tar.gz
+            dist/release/checksums.txt
+            dist/release/manifest.json
+          fail_on_unmatched_files: true
+          prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.build.outputs.prerelease == 'true' && 'false' || 'true' }}

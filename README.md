@@ -678,10 +678,17 @@ Each run contains:
 
 ## Release Packaging
 
-Build GitHub/Homebrew-ready release artifacts:
+Workyard releases are GitHub Releases created from `vX.Y.Z` tags. To cut a release:
 
 ```sh
-VERSION=0.1.0 scripts/build-release.sh
+git tag -a v0.1.0 -m "Workyard v0.1.0"
+git push origin v0.1.0
+```
+
+The release workflow runs tests, builds release artifacts, verifies them, and publishes the GitHub Release. For a local dry run:
+
+```sh
+VERSION=v0.1.0 scripts/build-release.sh
 ```
 
 The release builder writes tarballs, `checksums.txt`, and `manifest.json` under `dist/release/`:
@@ -694,6 +701,8 @@ workyard-linux-arm64.tar.gz
 checksums.txt
 manifest.json
 ```
+
+See [docs/releases.md](docs/releases.md) for the full release process.
 
 End-user install script:
 

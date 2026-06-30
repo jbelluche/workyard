@@ -1,9 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-v0.1.0}"
 OUT_DIR="${OUT_DIR:-dist/release}"
 LDFLAGS="-s -w -X github.com/jackbelluche/workyard/internal/cli.Version=${VERSION}"
+
+if ! printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+  printf 'VERSION must look like v0.1.0 or v0.1.0-rc.1, got: %s\n' "$VERSION" >&2
+  exit 2
+fi
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
