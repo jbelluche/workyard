@@ -251,7 +251,20 @@ build_from_source() {
 
 install_binary() {
   prepare_install_dir
-  install -m 755 "$tmp_dir/workyard" "$dest"
+  tmp_dest="$install_dir_real/.workyard-install-$$"
+  rm -f "$tmp_dest"
+  if ! install -m 755 "$tmp_dir/workyard" "$tmp_dest"; then
+    rm -f "$tmp_dest"
+    exit 1
+  fi
+  if ! "$tmp_dest" version >/dev/null; then
+    rm -f "$tmp_dest"
+    exit 1
+  fi
+  if ! mv -f "$tmp_dest" "$dest"; then
+    rm -f "$tmp_dest"
+    exit 1
+  fi
   "$dest" version >/dev/null
 }
 

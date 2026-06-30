@@ -40,6 +40,7 @@ listed below exit 1 unless they match a class pattern (`CONFIG_*`,
 | `WAIT_TIMEOUT` | wait | `workyard wait` (or deploy's wait step) hit its timeout |
 | `WORKER_ARTIFACT_MISSING` | generic | No matching binary artifact and no way to build one |
 | `WORKER_INSTALL_FAILED` | generic | Uploading or verifying the worker binary failed |
+| `UPDATE_FAILED` / `UPDATE_VERIFY_FAILED` | generic | Updating or verifying the local Workyard binary failed |
 
 Daemon-originated errors pass through with their own code, message, and hint;
 only transport failures are rewritten by the CLI.

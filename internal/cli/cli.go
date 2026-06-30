@@ -194,6 +194,7 @@ func newRoot(opts *options) *cobra.Command {
 	root.AddCommand(groupCommand(runsCommand(opts), commandGroupMaintenance))
 	root.AddCommand(groupCommand(cleanupCommand(opts), commandGroupMaintenance))
 
+	root.AddCommand(groupCommand(updateCommand(opts), commandGroupUtility))
 	root.AddCommand(groupCommand(versionCommand(opts), commandGroupUtility))
 	root.AddCommand(daemonctlCommand(opts))
 	root.AddCommand(portcheckCommand(opts))
@@ -240,9 +241,8 @@ func installCommand(opts *options) *cobra.Command {
 	var artifactDir string
 	var localBinary string
 	cmd := &cobra.Command{
-		Use:     "install",
-		Aliases: []string{"upgrade"},
-		Short:   "Install or upgrade the Workyard binary on a worker",
+		Use:   "install",
+		Short: "Install or upgrade the Workyard binary on a worker",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if opts.worker == "" {
 				return output.NewError("WORKER_REQUIRED", "--worker is required for install", "")

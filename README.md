@@ -19,6 +19,14 @@ curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/ins
 
 The installer supports macOS and Linux. It downloads the latest release artifact when one exists and falls back to building from a public source archive when Go is available. It installs Workyard to `~/.local/bin/workyard` by default and adds a marked PATH block to your shell profile (`~/.zshrc` or `~/.bashrc`) when needed.
 
+Upgrade an existing local install:
+
+```sh
+workyard update
+workyard upgrade
+workyard update --version v0.1.0
+```
+
 Install a specific release, custom repo, or custom directory:
 
 ```sh
@@ -777,10 +785,12 @@ workyard deploy . --worker user@worker-host --fresh
 workyard deploy . --worker user@worker-host --install
 ```
 
-Dependency, install, and daemon commands:
+Dependency, update, install, and daemon commands:
 
 ```sh
 workyard doctor
+workyard update
+workyard update --dry-run
 workyard --worker user@worker-host doctor
 workyard --worker user@worker-host install
 workyard daemon start
@@ -808,6 +818,7 @@ Cleanup and utility commands:
 workyard --worker user@worker-host cleanup logs
 workyard --worker user@worker-host cleanup run
 workyard ui --open
+workyard upgrade
 workyard version
 workyard completion zsh
 ```

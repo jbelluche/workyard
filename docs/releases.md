@@ -70,10 +70,17 @@ curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/ins
 workyard version
 ```
 
+Existing users can upgrade through the CLI:
+
+```sh
+workyard update --version v0.1.0
+```
+
 For a prerelease, pass its exact tag:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | WORKYARD_VERSION=v0.2.0-rc.1 sh
+workyard update --version v0.2.0-rc.1
 ```
 
 ## Versioning Notes

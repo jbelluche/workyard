@@ -77,6 +77,7 @@ func TestRootHelpGroupsCommandsByWorkflow(t *testing.T) {
 		"  runs        Manage locally registered Workyard runs",
 		"  cleanup     Safely clean Workyard runs and logs",
 		"Utility",
+		"  update      Update the local Workyard binary",
 		"  version     Print Workyard version",
 		"  help        Help about any command",
 		"  completion  Generate the autocompletion script for the specified shell",
