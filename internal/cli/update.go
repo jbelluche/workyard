@@ -102,7 +102,7 @@ func updateCommand(opts *options) *cobra.Command {
 				return nil
 			}
 			if !opts.quiet && !opts.json {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "updating workyard %s -> %s\n", plan.CurrentVersion, plan.RequestedVersion)
+				output.Infof(cmd.OutOrStdout(), "updating workyard %s -> %s", plan.CurrentVersion, plan.RequestedVersion)
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "install dir: %s\n", plan.InstallDir)
 			}
 			stdout, stderr, err := runLocalUpdate(cmd.Context(), plan, cmd.OutOrStdout(), cmd.ErrOrStderr(), opts.quiet || opts.json)
@@ -129,7 +129,7 @@ func updateCommand(opts *options) *cobra.Command {
 				})
 			}
 			if !opts.quiet {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "workyard is now %s at %s\n", installedVersion, filepath.Join(plan.InstallDir, "workyard"))
+				output.Successf(cmd.OutOrStdout(), "updated workyard to %s at %s", installedVersion, filepath.Join(plan.InstallDir, "workyard"))
 			}
 			return nil
 		},

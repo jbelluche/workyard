@@ -100,8 +100,8 @@ func AsCommandError(err error) *CommandError {
 func HumanError(w io.Writer, err error) {
 	ce := AsCommandError(err)
 	if ce.Hint != "" {
-		_, _ = fmt.Fprintf(w, "error: %s\nhint: %s\n", ce.Message, ce.Hint)
+		_, _ = fmt.Fprintf(w, "%s %s\n%s %s\n", Styled(w, RoleError, "error:"), ce.Message, Styled(w, RoleHint, "hint:"), ce.Hint)
 		return
 	}
-	_, _ = fmt.Fprintf(w, "error: %s\n", ce.Message)
+	_, _ = fmt.Fprintf(w, "%s %s\n", Styled(w, RoleError, "error:"), ce.Message)
 }

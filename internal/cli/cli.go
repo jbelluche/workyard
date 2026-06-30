@@ -269,7 +269,7 @@ func installCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), res)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "installed %s to %s:%s (%s)\n", res.LocalBinary, res.Worker, res.RemoteBinary, res.InstalledVersion)
+			output.Successf(cmd.OutOrStdout(), "installed %s to %s:%s (%s)", res.LocalBinary, res.Worker, res.RemoteBinary, res.InstalledVersion)
 			return nil
 		},
 	}
@@ -330,9 +330,9 @@ func runsCommand(opts *options) *cobra.Command {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "removed": removed})
 			}
 			if removed {
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "removed")
+				output.Successf(cmd.OutOrStdout(), "removed")
 			} else {
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "not found")
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s\n", output.StatusWord(cmd.OutOrStdout(), output.RoleWarning, "not found"))
 			}
 			return nil
 		},
@@ -353,7 +353,7 @@ func runsCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "removed": removed, "removedCount": len(removed)})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed %d stale run(s)\n", len(removed))
+			output.Successf(cmd.OutOrStdout(), "removed %d stale run(s)", len(removed))
 			return nil
 		},
 	}
@@ -416,7 +416,7 @@ func workersCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "path": store.Path(), "worker": workerWithTarget(worker)})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "registered %s as %s\n", worker.Name, worker.EffectiveSSHTarget())
+			output.Successf(cmd.OutOrStdout(), "registered %s as %s", worker.Name, worker.EffectiveSSHTarget())
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "config: %s\n", store.Path())
 			return nil
 		},
@@ -483,7 +483,7 @@ func workersCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "removedWorker": removedWorker, "removedRunCount": count})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed worker=%t runRefs=%d\n", removedWorker, count)
+			output.Successf(cmd.OutOrStdout(), "removed worker=%t runRefs=%d", removedWorker, count)
 			return nil
 		},
 	}
@@ -562,7 +562,7 @@ func workersCommand(opts *options) *cobra.Command {
 			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "config: %s\n", registry.DefaultWorkersPath(opts.stateDir))
 			if tailscaleErr != nil {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "tailscale: %s\n", tailscaleErr)
+				output.Warningf(cmd.OutOrStdout(), "tailscale: %s", tailscaleErr)
 			}
 			tableRows := make([][]string, 0, len(rows))
 			for _, row := range rows {
@@ -1154,9 +1154,9 @@ func cleanupCommand(opts *options) *cobra.Command {
 				return output.WriteJSON(cmd.OutOrStdout(), res)
 			}
 			if registry.IsLocalWorker(res.Worker) {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "cleaned logs at %s\n", res.RemoteLogPath)
+				output.Successf(cmd.OutOrStdout(), "cleaned logs at %s", res.RemoteLogPath)
 			} else {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "cleaned logs at %s:%s\n", res.Worker, res.RemoteLogPath)
+				output.Successf(cmd.OutOrStdout(), "cleaned logs at %s:%s", res.Worker, res.RemoteLogPath)
 			}
 			return nil
 		},
@@ -1178,7 +1178,7 @@ func cleanupCommand(opts *options) *cobra.Command {
 				if registry.IsLocalWorker(opts.worker) {
 					if _, err := localDaemonCall(cmd.Context(), opts, paths, "stop", nil, controlExtra{All: true}); err != nil {
 						if opts.verbose && !opts.json {
-							_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before cleanup skipped: %s\n", err)
+							output.Warningf(cmd.ErrOrStderr(), "stop before cleanup skipped: %s", err)
 						}
 					}
 				} else {
@@ -1206,9 +1206,9 @@ func cleanupCommand(opts *options) *cobra.Command {
 				return output.WriteJSON(cmd.OutOrStdout(), res)
 			}
 			if registry.IsLocalWorker(res.Worker) {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed run at %s\n", res.RemoteRunPath)
+				output.Successf(cmd.OutOrStdout(), "removed run at %s", res.RemoteRunPath)
 			} else {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed run at %s:%s\n", res.Worker, res.RemoteRunPath)
+				output.Successf(cmd.OutOrStdout(), "removed run at %s:%s", res.Worker, res.RemoteRunPath)
 			}
 			return nil
 		},
@@ -1416,10 +1416,12 @@ func printDoctorReport(w io.Writer, report doctor.Report) {
 		}
 	}
 	if report.OK {
-		_, _ = fmt.Fprintln(w, "\nok: required checks passed")
+		_, _ = fmt.Fprintln(w)
+		output.OKf(w, "required checks passed")
 		return
 	}
-	_, _ = fmt.Fprintln(w, "\nfailed: one or more required checks failed")
+	_, _ = fmt.Fprintln(w)
+	output.Failedf(w, "one or more required checks failed")
 }
 
 func printBootstrapReport(w io.Writer, report bootstrap.Report) {
@@ -1448,10 +1450,12 @@ func printBootstrapReport(w io.Writer, report bootstrap.Report) {
 		printDoctorReport(w, *report.DoctorReport)
 	}
 	if report.OK {
-		_, _ = fmt.Fprintln(w, "\nok: worker setup completed")
+		_, _ = fmt.Fprintln(w)
+		output.OKf(w, "worker setup completed")
 		return
 	}
-	_, _ = fmt.Fprintln(w, "\nfailed: worker setup did not complete")
+	_, _ = fmt.Fprintln(w)
+	output.Failedf(w, "worker setup did not complete")
 }
 
 func readHiddenPassword(w io.Writer, prompt string) (string, error) {
@@ -1510,7 +1514,7 @@ func uiCommand(opts *options) *cobra.Command {
 					return err
 				}
 			} else if !opts.quiet {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "workyard ui listening on http://%s\n", listen)
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "workyard ui %s on http://%s\n", output.StatusWord(cmd.ErrOrStderr(), output.RoleInfo, "listening"), listen)
 			}
 			return monitor.Serve(cmd.Context(), monitor.ServerOptions{
 				Listen:          listen,
@@ -1586,7 +1590,7 @@ func watchCommand(opts *options) *cobra.Command {
 						return nil
 					}
 					if err != nil && opts.verbose {
-						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "watch warning: %s\n", err)
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "watch %s %s\n", output.Styled(cmd.ErrOrStderr(), output.RoleWarning, "warning:"), err)
 					}
 					continue
 				case _, ok := <-changes:
@@ -1674,7 +1678,7 @@ func watchCommand(opts *options) *cobra.Command {
 						return err
 					}
 				} else if !opts.quiet {
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "synced %s; restarted %s\n", res.RemoteSourcePath, strings.Join(restarted, ","))
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s %s; %s %s\n", output.StatusWord(cmd.ErrOrStderr(), output.RoleSuccess, "synced"), res.RemoteSourcePath, output.StatusWord(cmd.ErrOrStderr(), output.RoleSuccess, "restarted"), strings.Join(restarted, ","))
 				}
 				if once {
 					return nil
@@ -1801,7 +1805,7 @@ func mirrorSetupCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "path": store.Path(), "mirror": stored, "destination": check})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "configured mirror %s (%s)\n", stored.Name, stored.ID)
+			output.Successf(cmd.OutOrStdout(), "configured mirror %s (%s)", stored.Name, stored.ID)
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "registry: %s\n", store.Path())
 			return nil
 		},
@@ -1886,7 +1890,7 @@ func mirrorStartCommand(opts *options) *cobra.Command {
 				if opts.json {
 					return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "pid": pid, "pidPath": pidPath})
 				}
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror already running pid=%d\n", pid)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror already %s pid=%d\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "running"), pid)
 				return nil
 			}
 			profiles, err := mirror.NewStore(mirror.DefaultPath(opts.stateDir)).List()
@@ -1903,7 +1907,7 @@ func mirrorStartCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "pid": pid, "pidPath": pidPath, "log": logPath})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror started pid=%d log=%s\n", pid, logPath)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror %s pid=%d log=%s\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "started"), pid, logPath)
 			return nil
 		},
 	}
@@ -1921,7 +1925,7 @@ func mirrorStopCommand(opts *options) *cobra.Command {
 				if opts.json {
 					return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": false, "message": "mirror was not running"})
 				}
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "mirror was not running")
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror was %s\n", output.StatusWord(cmd.OutOrStdout(), output.RoleWarning, "not running"))
 				return nil
 			}
 			if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
@@ -1934,7 +1938,7 @@ func mirrorStopCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": false, "pid": pid})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror stopped pid=%d\n", pid)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror %s pid=%d\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "stopped"), pid)
 			return nil
 		},
 	}
@@ -1972,9 +1976,9 @@ func mirrorStatusCommand(opts *options) *cobra.Command {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": running, "pid": pid, "pidPath": pidPath, "statePath": mirror.DefaultStatePath(opts.stateDir), "state": state, "mirrors": profiles})
 			}
 			if running {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror running pid=%d\n", pid)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror %s pid=%d\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "running"), pid)
 			} else {
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "mirror stopped")
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "mirror %s\n", output.StatusWord(cmd.OutOrStdout(), output.RoleWarning, "stopped"))
 			}
 			statusByID := map[string]mirror.RuntimeStatus{}
 			for _, item := range state.Mirrors {
@@ -2041,7 +2045,7 @@ func mirrorRenameCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "mirror": profile})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "renamed mirror %s (%s)\n", profile.Name, profile.ID)
+			output.Successf(cmd.OutOrStdout(), "renamed mirror %s (%s)", profile.Name, profile.ID)
 			return nil
 		},
 	}
@@ -2187,12 +2191,12 @@ func mirrorShellCommand(opts *options) *cobra.Command {
 					return output.NewError("MIRROR_SHELL_TMUX_MISSING", "tmux is not available on the worker", "Install tmux on the worker or run without --tmux")
 				}
 				if !opts.quiet {
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "opening tmux shell %s for %s (%s) at %s:%s\n", sessionName, profile.Name, profile.ID, resolved.Worker, check.ResolvedPath)
+					output.Infof(cmd.ErrOrStderr(), "opening tmux shell %s for %s (%s) at %s:%s", sessionName, profile.Name, profile.ID, resolved.Worker, check.ResolvedPath)
 				}
 				return runMirrorInteractiveSSH(cmd.Context(), resolved.Worker, mirrorRemoteShellCommand(mirrorTmuxShellScript(check.ResolvedPath, sessionName)), cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
 			if !opts.quiet {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "opening shell for %s (%s) at %s:%s\n", profile.Name, profile.ID, resolved.Worker, check.ResolvedPath)
+				output.Infof(cmd.ErrOrStderr(), "opening shell for %s (%s) at %s:%s", profile.Name, profile.ID, resolved.Worker, check.ResolvedPath)
 			}
 			return runMirrorInteractiveSSH(cmd.Context(), resolved.Worker, mirrorRemoteShellCommand(mirrorPlainShellScript(check.ResolvedPath)), cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
@@ -2333,7 +2337,7 @@ func mirrorServicesUpCommand(opts *options) *cobra.Command {
 					return err
 				}
 				if !opts.quiet && !opts.json {
-					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "ok: install")
+					output.OKf(cmd.ErrOrStderr(), "install")
 				}
 			}
 			if !skipSetup {
@@ -2357,7 +2361,7 @@ func mirrorServicesUpCommand(opts *options) *cobra.Command {
 			if res, err := remoteDaemonCall(ctx, &callOpts, paths, "stop", services, stopExtra); err == nil {
 				printMirrorServiceStep(cmd.ErrOrStderr(), opts, "stop", serviceStatusSummary(res.Services))
 			} else if opts.verbose && !opts.json {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before start skipped: %s\n", err)
+				output.Warningf(cmd.ErrOrStderr(), "stop before start skipped: %s", err)
 			}
 			startRes, err := remoteDaemonCall(ctx, &callOpts, paths, "start", services, controlExtra{Timeout: timeout})
 			if err != nil {
@@ -2554,7 +2558,7 @@ func mirrorServicesCleanupCommand(opts *options) *cobra.Command {
 			}
 			if stop {
 				if _, err := remoteDaemonCall(cmd.Context(), &callOpts, paths, "stop", nil, controlExtra{All: true}); err != nil && opts.verbose {
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before cleanup failed: %s\n", err)
+					output.Warningf(cmd.ErrOrStderr(), "stop before cleanup failed: %s", err)
 				}
 			}
 			if err := cleanupMirrorServiceRun(cmd.Context(), resolved, paths, check.ResolvedPath); err != nil {
@@ -2565,7 +2569,7 @@ func mirrorServicesCleanupCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "mirror": selection.Profile, "worker": resolved.Worker, "project": loaded.Config.Name, "runId": paths.RunID, "removed": paths.RunRoot})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed mirror service run %s:%s\n", resolved.Worker, paths.RunRoot)
+			output.Successf(cmd.OutOrStdout(), "removed mirror service run %s:%s", resolved.Worker, paths.RunRoot)
 			return nil
 		},
 	}
@@ -2784,10 +2788,10 @@ func printMirrorServiceStep(w io.Writer, opts *options, name, message string) {
 		return
 	}
 	if strings.TrimSpace(message) == "" {
-		_, _ = fmt.Fprintf(w, "ok: %s\n", name)
+		output.OKf(w, "%s", name)
 		return
 	}
-	_, _ = fmt.Fprintf(w, "ok: %s - %s\n", name, message)
+	output.OKf(w, "%s - %s", name, message)
 }
 
 func mirrorTmuxCommand(opts *options) *cobra.Command {
@@ -2861,9 +2865,9 @@ func mirrorTmuxCommand(opts *options) *cobra.Command {
 			}
 			switch status.Status {
 			case "killed":
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "killed tmux session %s on %s\n", sessionName, resolved.Worker)
+				output.Successf(cmd.OutOrStdout(), "killed tmux session %s on %s", sessionName, resolved.Worker)
 			case "missing":
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "tmux session %s was not running on %s\n", sessionName, resolved.Worker)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "tmux session %s was %s on %s\n", sessionName, output.StatusWord(cmd.OutOrStdout(), output.RoleWarning, "not running"), resolved.Worker)
 			default:
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "tmux session %s status %s on %s: %s\n", sessionName, status.Status, resolved.Worker, status.Message)
 			}
@@ -2891,7 +2895,7 @@ func mirrorSetEnabled(cmd *cobra.Command, opts *options, ref string, enabled boo
 	if !enabled {
 		action = "paused"
 	}
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s mirror %s (%s)\n", action, profile.Name, profile.ID)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s mirror %s (%s)\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, action), profile.Name, profile.ID)
 	return nil
 }
 
@@ -2931,7 +2935,7 @@ func mirrorDeleteCommand(opts *options) *cobra.Command {
 				}
 				deletedPath, err = mirror.DeleteRemote(cmd.Context(), resolved)
 				if err != nil {
-					return output.NewError("MIRROR_REMOTE_DELETE_FAILED", err.Error(), "Remote deletion requires a matching .workyard-mirror.json marker")
+					return output.NewError("MIRROR_REMOTE_DELETE_FAILED", err.Error(), "Remote deletion requires a matching Workyard mirror marker")
 				}
 			}
 			removed, ok, err := store.Delete(profile.ID)
@@ -2941,9 +2945,9 @@ func mirrorDeleteCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "removed": ok, "mirror": removed, "remoteDeleted": deleteRemote, "remoteDeletedPath": deletedPath})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed mirror %s (%s)\n", profile.Name, profile.ID)
+			output.Successf(cmd.OutOrStdout(), "removed mirror %s (%s)", profile.Name, profile.ID)
 			if deleteRemote {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "deleted remote files at %s:%s\n", profile.Worker, deletedPath)
+				output.Successf(cmd.OutOrStdout(), "deleted remote files at %s:%s", profile.Worker, deletedPath)
 			} else {
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "remote files left untouched at %s:%s\n", profile.Worker, profile.RemotePath)
 			}
@@ -2957,7 +2961,7 @@ func mirrorDeleteCommand(opts *options) *cobra.Command {
 }
 
 func printMirrorSyncResult(w io.Writer, res mirror.SyncResult, verbose bool) {
-	_, _ = fmt.Fprintf(w, "synced %s to %s:%s\n", res.Name, res.Worker, res.ResolvedPath)
+	_, _ = fmt.Fprintf(w, "%s %s to %s:%s\n", output.StatusWord(w, output.RoleSuccess, "synced"), res.Name, res.Worker, res.ResolvedPath)
 	if !verbose {
 		return
 	}
@@ -3004,7 +3008,7 @@ func runMirrorForeground(cmd *cobra.Command, opts *options, once bool, pollInter
 		return mirrorNoEnabledConfiguredError(profiles)
 	}
 	if !opts.quiet {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "mirroring %d profile(s)\n", enabled)
+		output.Infof(cmd.ErrOrStderr(), "mirroring %d profile(s)", enabled)
 	}
 	if err := runMirror(cmd, opts, profiles, mirror.RunOptions{
 		StateDir:     opts.stateDir,
@@ -3043,7 +3047,7 @@ func runMirror(cmd *cobra.Command, opts *options, profiles []mirror.Profile, run
 			_ = output.WriteJSONLine(cmd.OutOrStdout(), map[string]any{"ok": false, "name": profile.Name, "worker": profile.Worker, "error": err.Error()})
 			return
 		}
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "mirror %s error: %s\n", profile.Name, err)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "mirror %s %s %s\n", profile.Name, output.Styled(cmd.ErrOrStderr(), output.RoleError, "error:"), err)
 	}
 	return mirror.Run(cmd.Context(), profiles, runOpts)
 }
@@ -3506,7 +3510,7 @@ func checkedMirrorDestination(cmd *cobra.Command, opts *options, reader *bufio.R
 			reason := firstNonEmpty(check.NonEmptyReason, check.State)
 			return mirror.DestinationCheck{}, output.NewError("MIRROR_DESTINATION_NOT_READY", fmt.Sprintf("%s:%s is not ready: %s", profile.Worker, profile.RemotePath, reason), "Choose a different --remote-path; --force only allows non-empty directories")
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "That destination is not ready: %s\n", firstNonEmpty(check.NonEmptyReason, check.State))
+		output.Warningf(cmd.OutOrStdout(), "destination is not ready: %s", firstNonEmpty(check.NonEmptyReason, check.State))
 		next := promptLine(cmd.OutOrStdout(), reader, "Remote destination", mirror.DefaultRemotePath(profile.LocalRoot))
 		profile.RemotePath = next
 		resolved.RemotePath = next
@@ -3534,7 +3538,7 @@ func printMirrorSetupSummary(w io.Writer, profile mirror.Profile, sshTarget stri
 	_, _ = fmt.Fprintf(w, "  includeGit: %t\n", profile.IncludeGit)
 	_, _ = fmt.Fprintf(w, "  delete:     %t\n", profile.Delete)
 	if check.State == "non-empty" {
-		_, _ = fmt.Fprintln(w, "  warning:    destination is not empty")
+		_, _ = fmt.Fprintf(w, "  %s    destination is not empty\n", output.Styled(w, output.RoleWarning, "warning:"))
 	}
 }
 
@@ -3555,10 +3559,12 @@ func printMirrorDoctorReport(w io.Writer, report mirror.DoctorReport) {
 		}
 	}
 	if report.OK {
-		_, _ = fmt.Fprintln(w, "\nok: mirror checks passed")
+		_, _ = fmt.Fprintln(w)
+		output.OKf(w, "mirror checks passed")
 		return
 	}
-	_, _ = fmt.Fprintln(w, "\nfailed: one or more mirror checks failed")
+	_, _ = fmt.Fprintln(w)
+	output.Failedf(w, "one or more mirror checks failed")
 }
 
 type mirrorFixReport struct {
@@ -3873,7 +3879,7 @@ func initCommand(opts *options) *cobra.Command {
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "configPath": path, "created": true})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "created %s\n", path)
+			output.Successf(cmd.OutOrStdout(), "created %s", path)
 			return nil
 		},
 	}
@@ -3903,9 +3909,9 @@ func configCommand(opts *options) *cobra.Command {
 				}
 				return output.WriteJSON(cmd.OutOrStdout(), checkResponse{OK: true, ConfigPath: loaded.Config.Path, Warnings: warnings})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "ok: %s\n", loaded.Config.Path)
+			output.OKf(cmd.OutOrStdout(), "%s", loaded.Config.Path)
 			for _, warning := range loaded.Warnings {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "warning: %s\n", warning)
+				output.Warningf(cmd.OutOrStdout(), "%s", warning)
 			}
 			return nil
 		},
@@ -4024,14 +4030,14 @@ func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string
 		steps = append(steps, deployStep{Name: name, OK: true, Message: message})
 		if !opts.quiet && !opts.json {
 			if message == "" {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "ok: %s\n", name)
+				output.OKf(cmd.ErrOrStderr(), "%s", name)
 			} else {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "ok: %s - %s\n", name, message)
+				output.OKf(cmd.ErrOrStderr(), "%s - %s", name, message)
 			}
 		}
 	}
 	if !opts.quiet && !opts.json {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "deploying %s to %s run=%s\n", loaded.Config.Name, opts.worker, run)
+		output.Infof(cmd.ErrOrStderr(), "deploying %s to %s run=%s", loaded.Config.Name, opts.worker, run)
 	}
 	if registry.IsLocalWorker(opts.worker) {
 		return runLocalDeploy(cmd, opts, d, loaded, services, waitServices, run, &steps, step)
@@ -4128,7 +4134,7 @@ func runDeploy(cmd *cobra.Command, opts *options, d deployOptions, args []string
 	if res, err := remoteDaemonCall(cmd.Context(), opts, paths, "stop", services, stopExtra); err == nil {
 		step("stop", serviceStatusSummary(res.Services))
 	} else if opts.verbose && !opts.json {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before start skipped: %s\n", err)
+		output.Warningf(cmd.ErrOrStderr(), "stop before start skipped: %s", err)
 	}
 	startRes, err := remoteDaemonCall(cmd.Context(), opts, paths, "start", services, controlExtra{Timeout: d.timeout})
 	if err != nil {
@@ -4247,7 +4253,7 @@ func runLocalDeploy(cmd *cobra.Command, opts *options, d deployOptions, loaded c
 	if res, err := localDaemonCall(cmd.Context(), opts, paths, "stop", services, stopExtra); err == nil {
 		step("stop", serviceStatusSummary(res.Services))
 	} else if opts.verbose && !opts.json {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before start skipped: %s\n", err)
+		output.Warningf(cmd.ErrOrStderr(), "stop before start skipped: %s", err)
 	}
 	startRes, err := localDaemonCall(cmd.Context(), opts, paths, "start", services, controlExtra{Timeout: d.timeout})
 	if err != nil {
@@ -4317,11 +4323,11 @@ func deployFresh(cmd *cobra.Command, opts *options, paths remote.Paths, run stri
 		return false, nil
 	}
 	if !opts.quiet && !opts.json {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "fresh: removing existing run %s\n", paths.RunRoot)
+		output.Infof(cmd.ErrOrStderr(), "fresh: removing existing run %s", paths.RunRoot)
 	}
 	if _, err := remoteDaemonCall(cmd.Context(), opts, paths, "stop", nil, controlExtra{All: true}); err != nil {
 		if !opts.quiet {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before fresh cleanup failed: %s\n", err)
+			output.Warningf(cmd.ErrOrStderr(), "stop before fresh cleanup failed: %s", err)
 		}
 	}
 	if _, err := remote.CleanupRun(cmd.Context(), opts.worker, paths); err != nil {
@@ -4341,11 +4347,11 @@ func deployLocalFresh(cmd *cobra.Command, opts *options, paths remote.Paths, run
 		return false, nil
 	}
 	if !opts.quiet && !opts.json {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "fresh: removing existing run %s\n", paths.RunRoot)
+		output.Infof(cmd.ErrOrStderr(), "fresh: removing existing run %s", paths.RunRoot)
 	}
 	if _, err := localDaemonCall(cmd.Context(), opts, paths, "stop", nil, controlExtra{All: true}); err != nil {
 		if !opts.quiet {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: stop before fresh cleanup failed: %s\n", err)
+			output.Warningf(cmd.ErrOrStderr(), "stop before fresh cleanup failed: %s", err)
 		}
 	}
 	if _, err := cleanupLocalRun(paths); err != nil {
@@ -4561,9 +4567,9 @@ func syncCommand(opts *options) *cobra.Command {
 				return output.WriteJSON(cmd.OutOrStdout(), res)
 			}
 			if registry.IsLocalWorker(res.Worker) {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "synced %s to %s\n", res.Project, res.RemoteSourcePath)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s to %s\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "synced"), res.Project, res.RemoteSourcePath)
 			} else {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "synced %s to %s:%s\n", res.Project, res.Worker, res.RemoteSourcePath)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s to %s:%s\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "synced"), res.Project, res.Worker, res.RemoteSourcePath)
 			}
 			return nil
 		},
@@ -4586,7 +4592,7 @@ func daemonCommand(opts *options) *cobra.Command {
 			if opts.json {
 				_ = output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "message": "daemon starting"})
 			} else if !opts.quiet {
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "workyard daemon starting")
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "workyard daemon %s\n", output.StatusWord(cmd.ErrOrStderr(), output.RoleInfo, "starting"))
 			}
 			return worker.Serve(cmd.Context(), worker.DaemonOptions{StateDir: opts.stateDir, Socket: opts.socket, AllowRoot: allowRoot, Version: Version})
 		},
@@ -4635,13 +4641,13 @@ func daemonStatusCommand(opts *options) *cobra.Command {
 				if opts.json {
 					return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": false, "running": false, "socket": socket, "error": err.Error()})
 				}
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon stopped (%s)\n", socket)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon %s (%s)\n", output.StatusWord(cmd.OutOrStdout(), output.RoleWarning, "stopped"), socket)
 				return nil
 			}
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "socket": socket, "version": res.Version, "message": res.Message})
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon running (%s) version=%s\n", socket, firstNonEmpty(res.Version, "unknown"))
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon %s (%s) version=%s\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "running"), socket, firstNonEmpty(res.Version, "unknown"))
 			warnDaemonVersion(cmd.ErrOrStderr(), opts, res.Version)
 			return nil
 		},
@@ -4661,7 +4667,7 @@ func warnDaemonVersion(w io.Writer, opts *options, daemonVersion string) {
 		return
 	}
 	daemonVersionWarned = true
-	_, _ = fmt.Fprintf(w, "warning: daemon version %s does not match CLI version %s; restart it with workyard daemon stop && workyard daemon start\n", daemonVersion, Version)
+	output.Warningf(w, "daemon version %s does not match CLI version %s; restart it with workyard daemon stop && workyard daemon start", daemonVersion, Version)
 }
 
 func startLocalDaemon(cmd *cobra.Command, opts *options, allowRoot bool) error {
@@ -4671,7 +4677,7 @@ func startLocalDaemon(cmd *cobra.Command, opts *options, allowRoot bool) error {
 			return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "socket": socket, "message": res.Message})
 		}
 		if !opts.quiet {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon already running (%s)\n", socket)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon already %s (%s)\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "running"), socket)
 		}
 		return nil
 	}
@@ -4683,7 +4689,7 @@ func startLocalDaemon(cmd *cobra.Command, opts *options, allowRoot bool) error {
 		return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": true, "pid": result.PID, "socket": result.Socket, "log": result.Log})
 	}
 	if !opts.quiet {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon started pid=%d socket=%s log=%s\n", result.PID, result.Socket, result.Log)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon %s pid=%d socket=%s log=%s\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "started"), result.PID, result.Socket, result.Log)
 	}
 	return nil
 }
@@ -4762,7 +4768,7 @@ func stopLocalDaemon(cmd *cobra.Command, opts *options) error {
 			return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": false, "socket": socket, "message": "daemon was not running"})
 		}
 		if !opts.quiet {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon was not running (%s)\n", socket)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon was %s (%s)\n", output.StatusWord(cmd.OutOrStdout(), output.RoleWarning, "not running"), socket)
 		}
 		return nil
 	}
@@ -4773,7 +4779,11 @@ func stopLocalDaemon(cmd *cobra.Command, opts *options) error {
 		return output.WriteJSON(cmd.OutOrStdout(), map[string]any{"ok": true, "running": false, "socket": socket, "message": res.Message})
 	}
 	if !opts.quiet {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s (%s)\n", res.Message, socket)
+		if res.Message == "daemon stopped" {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "daemon %s (%s)\n", output.StatusWord(cmd.OutOrStdout(), output.RoleSuccess, "stopped"), socket)
+		} else {
+			output.Successf(cmd.OutOrStdout(), "%s (%s)", res.Message, socket)
+		}
 	}
 	return nil
 }
@@ -4973,7 +4983,7 @@ func followRemoteLogs(cmd *cobra.Command, opts *options, loaded config.Loaded, r
 	}
 	script := followTailScript(paths.Logs, files, tailLines)
 	if !opts.quiet {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "following %d log file(s) on %s\n", len(files), opts.worker)
+		output.Infof(cmd.ErrOrStderr(), "following %d log file(s) on %s", len(files), opts.worker)
 	}
 	err = remote.Stream(cmd.Context(), opts.worker, []string{"sh", "-lc", script}, nil, cmd.OutOrStdout(), cmd.ErrOrStderr())
 	if cmd.Context().Err() != nil {
@@ -5206,7 +5216,7 @@ func runControl(cmd *cobra.Command, opts *options, action string, services []str
 			run = ref.RunID
 		}
 		if !opts.quiet && !opts.json {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "using registered run %s/%s (%s)\n", ref.Project, ref.RunID, ref.LocalRoot)
+			output.Infof(cmd.ErrOrStderr(), "using registered run %s/%s (%s)", ref.Project, ref.RunID, ref.LocalRoot)
 		}
 	}
 	if err := validateServiceArgs(loaded.Config, action, services); err != nil {
@@ -5426,7 +5436,7 @@ func localControl(cmd *cobra.Command, opts *options, loaded config.Loaded, actio
 			if opts.json {
 				return output.WriteJSON(cmd.OutOrStdout(), worker.Response{OK: true, Message: "daemon not running; nothing to stop"})
 			}
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "nothing to stop (daemon not running)")
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "nothing to stop (daemon %s)\n", output.StatusWord(cmd.OutOrStdout(), output.RoleWarning, "not running"))
 			return nil
 		}
 		if output.AsCommandError(err) != nil {
@@ -5644,9 +5654,9 @@ func printDaemonResponse(w io.Writer, res worker.Response, jsonOut bool, action 
 			_, _ = fmt.Fprintf(w, "%s %s\n", u.Service, u.URL)
 		}
 	case "probe":
-		_, _ = fmt.Fprintln(w, res.Message)
+		output.Successf(w, "%s", res.Message)
 	case "setup", "build":
-		_, _ = fmt.Fprintln(w, res.Message)
+		output.Successf(w, "%s", res.Message)
 	case "inspect":
 		printInspectResponse(w, res)
 	default:
@@ -5690,7 +5700,7 @@ func printInspectResponse(w io.Writer, res worker.Response) {
 		if svc.Healthy {
 			health = "healthy"
 		}
-		_, _ = fmt.Fprintf(w, "%s  %s (%s)\n", svc.Name, svc.Status, health)
+		_, _ = fmt.Fprintf(w, "%s  %s (%s)\n", svc.Name, output.ColorizeTableCell(w, "STATUS", svc.Status), output.ColorizeTableCell(w, "HEALTHY", health))
 		field := func(label, value string) {
 			if strings.TrimSpace(value) != "" {
 				_, _ = fmt.Fprintf(w, "  %-15s %s\n", label+":", value)
@@ -5729,7 +5739,7 @@ func printInspectResponse(w io.Writer, res worker.Response) {
 		field("logs", strings.Join(logPaths, ", "))
 		field("logs command", svc.LogsCommand)
 		if len(svc.RecentErrors) > 0 {
-			_, _ = fmt.Fprintln(w, "  recent stderr:")
+			_, _ = fmt.Fprintf(w, "  %s\n", output.Styled(w, output.RoleError, "recent stderr:"))
 			for _, line := range svc.RecentErrors {
 				_, _ = fmt.Fprintf(w, "    %s\n", line)
 			}
@@ -5737,9 +5747,9 @@ func printInspectResponse(w io.Writer, res worker.Response) {
 	}
 	if len(res.Hints) > 0 {
 		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "hints:")
+		_, _ = fmt.Fprintf(w, "%s\n", output.Styled(w, output.RoleHint, "hints:"))
 		for _, hint := range res.Hints {
-			_, _ = fmt.Fprintf(w, "  [%s] %s: %s\n", hint.Severity, hint.Service, hint.Message)
+			_, _ = fmt.Fprintf(w, "  [%s] %s: %s\n", output.ColorizeTableCell(w, "STATUS", hint.Severity), hint.Service, hint.Message)
 			if hint.NextCommand != "" {
 				_, _ = fmt.Fprintf(w, "    next: %s\n", hint.NextCommand)
 			}
@@ -5782,7 +5792,7 @@ func rememberRun(w io.Writer, opts *options, loaded config.Loaded, ref registry.
 	}
 	store := registry.New(registry.DefaultPath(opts.stateDir))
 	if err := store.Upsert(ref); err != nil && opts.verbose {
-		_, _ = fmt.Fprintf(w, "warning: failed to update local monitor registry: %s\n", err)
+		output.Warningf(w, "failed to update local monitor registry: %s", err)
 	}
 }
 

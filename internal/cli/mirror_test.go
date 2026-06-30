@@ -33,6 +33,17 @@ func TestMirrorHelpShowsHelpInsteadOfStartingSync(t *testing.T) {
 	}
 }
 
+func TestMirrorServiceStepColorsOKPrefix(t *testing.T) {
+	t.Setenv("WORKYARD_COLOR", "always")
+	var out strings.Builder
+	printMirrorServiceStep(&out, &options{}, "stop", "")
+	got := out.String()
+	want := "\x1b[32mok:\x1b[0m stop\n"
+	if got != want {
+		t.Fatalf("step output mismatch\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
 func TestMirrorUnknownCommandFailsInsteadOfStartingSync(t *testing.T) {
 	stateDir := t.TempDir()
 	root := newRoot(&options{})

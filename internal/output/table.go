@@ -36,7 +36,7 @@ func WriteTable(w io.Writer, headers []string, rows [][]string) error {
 				cells[i] = cleanCell(row[i])
 			}
 		}
-		if err := writeTableRow(w, cells, widths); err != nil {
+		if err := writeStyledTableRow(w, headers, cells, widths); err != nil {
 			return err
 		}
 	}
@@ -60,6 +60,37 @@ func writeTableRow(w io.Writer, cells []string, widths []int) error {
 			return err
 		}
 		if _, err := io.WriteString(w, strings.Repeat(" ", widths[i]-cellWidth(cell))); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w)
+	return err
+}
+
+func writeStyledTableRow(w io.Writer, headers, cells []string, widths []int) error {
+	styled := make([]string, len(cells))
+	copy(styled, cells)
+	for i := range styled {
+		if i < len(headers) {
+			styled[i] = ColorizeTableCell(w, headers[i], styled[i])
+		}
+	}
+	for i, cell := range styled {
+		if i > 0 {
+			if _, err := io.WriteString(w, tableColumnGap); err != nil {
+				return err
+			}
+		}
+		if i == len(styled)-1 {
+			if _, err := io.WriteString(w, cell); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := io.WriteString(w, cell); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, strings.Repeat(" ", widths[i]-cellWidth(cells[i]))); err != nil {
 			return err
 		}
 	}

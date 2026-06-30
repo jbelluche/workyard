@@ -331,7 +331,9 @@ func DeleteRemote(ctx context.Context, profile Profile) (string, error) {
 
 func MarkerMatches(marker Marker, profile Profile) bool {
 	if marker.ID != "" && profile.ID != "" {
-		return marker.ID == profile.ID
+		if marker.ID == profile.ID {
+			return true
+		}
 	}
 	return marker.Name == profile.Name && marker.LocalRoot == profile.LocalRoot
 }
@@ -455,16 +457,18 @@ func prepareDestination(ctx context.Context, worker, resolved string) error {
 }
 
 func destinationCheckScript(resolved string) string {
+	sidecarMarker := markerPath(resolved)
 	return strings.Join([]string{
 		"set -eu",
 		"dest=" + remote.ShellQuote(resolved),
-		"marker=\"$dest/" + MarkerFileName + "\"",
+		"marker=" + remote.ShellQuote(sidecarMarker),
+		"legacy_marker=\"$dest/" + MarkerFileName + "\"",
 		"if [ ! -e \"$dest\" ]; then printf 'missing\\n'; exit 0; fi",
 		"if [ -L \"$dest\" ]; then printf 'symlink\\n'; exit 0; fi",
 		"if [ ! -d \"$dest\" ]; then printf 'not-directory\\n'; exit 0; fi",
 		"first=$(find \"$dest\" -mindepth 1 -maxdepth 1 ! -name " + remote.ShellQuote(MarkerFileName) + " -print -quit)",
 		"if [ -n \"$first\" ]; then printf 'non-empty\\n'; exit 0; fi",
-		"if [ -f \"$marker\" ]; then printf 'marker-only\\n'; exit 0; fi",
+		"if [ -f \"$marker\" ] || [ -f \"$legacy_marker\" ]; then printf 'marker-only\\n'; exit 0; fi",
 		"printf 'empty\\n'",
 	}, "\n")
 }

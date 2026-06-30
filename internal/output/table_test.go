@@ -35,3 +35,40 @@ func TestWriteTableCleansMultilineCells(t *testing.T) {
 		t.Fatalf("cell was not cleaned: %q", b.String())
 	}
 }
+
+func TestColorHelpersUseSemanticPrefixes(t *testing.T) {
+	t.Setenv("WORKYARD_COLOR", "always")
+	var b strings.Builder
+	OKf(&b, "setup - setup completed")
+	Warningf(&b, "daemon version mismatch")
+	Failedf(&b, "one or more checks failed")
+	got := b.String()
+	for _, want := range []string{
+		"\x1b[32mok:\x1b[0m setup - setup completed\n",
+		"\x1b[33mwarning:\x1b[0m daemon version mismatch\n",
+		"\x1b[31mfailed:\x1b[0m one or more checks failed\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing colored line %q in %q", want, got)
+		}
+	}
+}
+
+func TestWriteTableColorsStatusCellsWhenEnabled(t *testing.T) {
+	t.Setenv("WORKYARD_COLOR", "always")
+	var b strings.Builder
+	if err := WriteTable(&b, []string{"SERVICE", "STATUS", "HEALTHY"}, [][]string{{"api", "running", "true"}, {"worker", "failed", "false"}}); err != nil {
+		t.Fatal(err)
+	}
+	got := b.String()
+	for _, want := range []string{
+		"\x1b[32mrunning\x1b[0m",
+		"\x1b[32mtrue\x1b[0m",
+		"\x1b[31mfailed\x1b[0m",
+		"\x1b[31mfalse\x1b[0m",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+}

@@ -182,6 +182,52 @@ func TestMarkerPathLivesOutsideMirrorDestination(t *testing.T) {
 	}
 }
 
+func TestMarkerMatchesFallsBackToStableOwnerWhenIDsDiffer(t *testing.T) {
+	profile := Profile{
+		ID:        "new1234",
+		Name:      "project",
+		LocalRoot: "/Users/dev/workspace/project",
+	}
+	marker := Marker{
+		ID:        "old1234",
+		Name:      profile.Name,
+		LocalRoot: profile.LocalRoot,
+	}
+	if !MarkerMatches(marker, profile) {
+		t.Fatalf("expected marker to match by stable owner despite id change")
+	}
+}
+
+func TestMarkerMatchesRejectsDifferentIDAndOwner(t *testing.T) {
+	profile := Profile{
+		ID:        "new1234",
+		Name:      "project",
+		LocalRoot: "/Users/dev/workspace/project",
+	}
+	marker := Marker{
+		ID:        "old1234",
+		Name:      profile.Name,
+		LocalRoot: "/Users/dev/workspace/other",
+	}
+	if MarkerMatches(marker, profile) {
+		t.Fatalf("expected marker with different id and owner to be rejected")
+	}
+}
+
+func TestDestinationCheckScriptUsesSidecarMarker(t *testing.T) {
+	dest := "/home/dev/workspace/workyard"
+	script := destinationCheckScript(dest)
+	for _, want := range []string{
+		markerPath(dest),
+		"legacy_marker=\"$dest/" + MarkerFileName + "\"",
+		"[ -f \"$marker\" ] || [ -f \"$legacy_marker\" ]",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("destination check script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestWriteExcludeFileHonorsIncludeGit(t *testing.T) {
 	root := t.TempDir()
 	local := filepath.Join(root, "project")
