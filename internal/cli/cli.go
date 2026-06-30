@@ -1693,14 +1693,27 @@ func mirrorCommand(opts *options) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "mirror",
 		Short: "Continuously mirror registered directories to workers",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runMirrorForeground(cmd, opts, once, pollInterval)
 		},
 	}
 	root.Flags().BoolVar(&once, "once", false, "sync enabled mirrors once and exit")
 	root.Flags().DurationVar(&pollInterval, "poll-interval", 500*time.Millisecond, "fallback polling interval")
-	root.AddCommand(mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorRenameCommand(opts), mirrorDoctorCommand(opts), mirrorShellCommand(opts), mirrorExecCommand(opts), mirrorServicesCommand(opts), mirrorTmuxCommand(opts), mirrorDeleteCommand(opts))
+	root.AddCommand(mirrorHelpCommand(), mirrorSetupCommand(opts), mirrorListCommand(opts), mirrorStartCommand(opts), mirrorStopCommand(opts), mirrorStatusCommand(opts), mirrorPauseCommand(opts), mirrorResumeCommand(opts), mirrorRenameCommand(opts), mirrorDoctorCommand(opts), mirrorShellCommand(opts), mirrorExecCommand(opts), mirrorServicesCommand(opts), mirrorTmuxCommand(opts), mirrorDeleteCommand(opts))
 	return root
+}
+
+func mirrorHelpCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:    "help",
+		Short:  "Help about mirror",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Parent().Help()
+		},
+	}
 }
 
 func mirrorSetupCommand(opts *options) *cobra.Command {

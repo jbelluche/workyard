@@ -12,6 +12,49 @@ import (
 	"github.com/jackbelluche/workyard/internal/remote"
 )
 
+func TestMirrorHelpShowsHelpInsteadOfStartingSync(t *testing.T) {
+	stateDir := t.TempDir()
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{"Continuously mirror registered directories to workers", "Usage:", "workyard mirror", "setup"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("help output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "no mirrors are configured") {
+		t.Fatalf("mirror help started sync path:\n%s", got)
+	}
+}
+
+func TestMirrorUnknownCommandFailsInsteadOfStartingSync(t *testing.T) {
+	stateDir := t.TempDir()
+	root := newRoot(&options{})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--state-dir", stateDir, "mirror", "definitely-not-a-command"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected unknown mirror command to fail")
+	}
+	if !strings.Contains(err.Error(), `unknown command "definitely-not-a-command"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out.String(), "no mirrors are configured") {
+		t.Fatalf("unknown command started sync path:\n%s", out.String())
+	}
+	if _, statErr := os.Stat(mirror.DefaultPIDPath(stateDir)); !os.IsNotExist(statErr) {
+		t.Fatalf("pid file should not exist, stat err=%v", statErr)
+	}
+}
+
 func TestMirrorPauseRequiresIDWhenNameIsAmbiguous(t *testing.T) {
 	stateDir, firstID := writeMirrorConflictRegistry(t)
 	root := newRoot(&options{})
