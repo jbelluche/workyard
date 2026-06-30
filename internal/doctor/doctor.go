@@ -399,7 +399,7 @@ func workerSSH(ctx context.Context, runner Runner, worker string, timeout time.D
 			Required: true,
 			Message:  "worker SSH target is invalid",
 			Detail:   err.Error(),
-			Hint:     "Use a normal SSH target such as jack@jack-rasp-five",
+			Hint:     "Use a normal SSH target such as dev@workyard-pi",
 		}
 	}
 	if _, err := runner.LookPath("ssh"); err != nil {

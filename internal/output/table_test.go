@@ -10,17 +10,17 @@ func TestWriteTableAlignsColumns(t *testing.T) {
 	err := WriteTable(&b,
 		[]string{"NAME", "HOST", "ONLINE", "TRACKED", "SSH TARGET", "IP"},
 		[][]string{
-			{"Jack’s MacBook Pro", "Jack’s MacBook Pro", "false", "false", "", "100.82.63.64"},
-			{"jack-r5-16gb", "jack-r5-16gb", "true", "false", "", "100.84.97.112"},
+			{"Developer Laptop", "Developer Laptop", "false", "false", "", "100.64.0.10"},
+			{"linux-builder", "linux-builder", "true", "false", "", "100.64.0.11"},
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := "" +
-		"NAME                HOST                ONLINE  TRACKED  SSH TARGET  IP\n" +
-		"Jack’s MacBook Pro  Jack’s MacBook Pro  false   false                100.82.63.64\n" +
-		"jack-r5-16gb        jack-r5-16gb        true    false                100.84.97.112\n"
+		"NAME              HOST              ONLINE  TRACKED  SSH TARGET  IP\n" +
+		"Developer Laptop  Developer Laptop  false   false                100.64.0.10\n" +
+		"linux-builder     linux-builder     true    false                100.64.0.11\n"
 	if got := b.String(); got != want {
 		t.Fatalf("table mismatch\nwant:\n%q\ngot:\n%q", want, got)
 	}

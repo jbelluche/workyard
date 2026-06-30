@@ -11,10 +11,10 @@ func TestLoadConfigParsesBootstrapWorkers(t *testing.T) {
 	data := []byte(`
 version: 1
 workers:
-  jack-r5-16gb:
+  linux-builder:
     ssh:
-      user: jack
-      host: jack-r5-16gb
+      user: dev
+      host: linux-builder
     register: true
     workyard:
       install: true
@@ -44,8 +44,8 @@ workers:
 	if !found {
 		t.Fatal("expected config to be found")
 	}
-	spec := cfg.Workers["jack-r5-16gb"]
-	if spec.SSH.User != "jack" || spec.SSH.Host != "jack-r5-16gb" {
+	spec := cfg.Workers["linux-builder"]
+	if spec.SSH.User != "dev" || spec.SSH.Host != "linux-builder" {
 		t.Fatalf("unexpected ssh spec: %#v", spec.SSH)
 	}
 	if !boolDefault(spec.Workyard.Install, false) || !boolDefault(spec.Docker.Install, false) || !boolDefault(spec.Checks.Doctor, false) {

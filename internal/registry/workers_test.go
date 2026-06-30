@@ -13,11 +13,11 @@ func TestWorkerStoreUpsertResolveAndRemove(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "workers.yaml")
 	store := NewWorkerStore(path)
 	worker := WorkerConfig{
-		Name:    "jack-r5-16gb",
-		Host:    "jack-r5-16gb",
-		User:    "jack",
+		Name:    "linux-builder",
+		Host:    "linux-builder",
+		User:    "dev",
 		Source:  "tailscale",
-		DNSName: "jack-r5-16gb.example.ts.net.",
+		DNSName: "linux-builder.example.ts.net.",
 	}
 	if err := store.Upsert(worker); err != nil {
 		t.Fatal(err)
@@ -45,18 +45,18 @@ func TestWorkerStoreUpsertResolveAndRemove(t *testing.T) {
 	if err := store.Upsert(worker); err != nil {
 		t.Fatal(err)
 	}
-	resolved, ok, err := store.Resolve("jack-r5-16gb")
+	resolved, ok, err := store.Resolve("linux-builder")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || resolved.EffectiveSSHTarget() != "pi@jack-r5-16gb" {
+	if !ok || resolved.EffectiveSSHTarget() != "pi@linux-builder" {
 		t.Fatalf("unexpected resolved worker: ok=%t worker=%#v", ok, resolved)
 	}
 	if !resolved.RegisteredAt.Equal(first[0].RegisteredAt) || !resolved.UpdatedAt.After(first[0].UpdatedAt) {
 		t.Fatalf("timestamps were not preserved/advanced: %#v", resolved)
 	}
 
-	removed, err := store.Remove("pi@jack-r5-16gb")
+	removed, err := store.Remove("pi@linux-builder")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,12 +73,12 @@ func TestWorkerStoreUpsertResolveAndRemove(t *testing.T) {
 }
 
 func TestWorkerConfigEffectiveSSHTargetUsesEditableUserAndHost(t *testing.T) {
-	worker := WorkerConfig{Name: "pi", Host: "jack-r5-16gb", User: "jack"}
-	if got := worker.EffectiveSSHTarget(); got != "jack@jack-r5-16gb" {
+	worker := WorkerConfig{Name: "pi", Host: "linux-builder", User: "dev"}
+	if got := worker.EffectiveSSHTarget(); got != "dev@linux-builder" {
 		t.Fatalf("target=%q", got)
 	}
 	worker.User = "debian"
-	if got := worker.EffectiveSSHTarget(); got != "debian@jack-r5-16gb" {
+	if got := worker.EffectiveSSHTarget(); got != "debian@linux-builder" {
 		t.Fatalf("target after user edit=%q", got)
 	}
 	worker.SSHTarget = "custom-worker"
@@ -89,14 +89,14 @@ func TestWorkerConfigEffectiveSSHTargetUsesEditableUserAndHost(t *testing.T) {
 
 func TestWorkerStoreRejectsInvalidWorker(t *testing.T) {
 	store := NewWorkerStore(filepath.Join(t.TempDir(), "workers.yaml"))
-	if err := store.Upsert(WorkerConfig{Name: "bad name", Host: "host", User: "jack"}); err == nil {
+	if err := store.Upsert(WorkerConfig{Name: "bad name", Host: "host", User: "dev"}); err == nil {
 		t.Fatal("expected invalid worker name to be rejected")
 	}
 }
 
 func TestWorkerStoreRejectsLocalhostOverride(t *testing.T) {
 	store := NewWorkerStore(filepath.Join(t.TempDir(), "workers.yaml"))
-	if err := store.Upsert(WorkerConfig{Name: LocalWorkerName, Host: LocalWorkerName, User: "jack"}); err == nil {
+	if err := store.Upsert(WorkerConfig{Name: LocalWorkerName, Host: LocalWorkerName, User: "dev"}); err == nil {
 		t.Fatal("expected localhost worker override to be rejected")
 	}
 	if !IsLocalWorker("LOCALHOST") {
@@ -109,11 +109,11 @@ func TestWorkerStoreMigratesLegacyJSONWhenYAMLMissing(t *testing.T) {
 	legacyPath := filepath.Join(dir, "workers.json")
 	yamlPath := filepath.Join(dir, "workers.yaml")
 	data, err := json.Marshal(WorkersFile{Workers: []WorkerConfig{{
-		Name:      "jack-rasp-five",
-		Host:      "jack-rasp-five",
-		User:      "jack",
+		Name:      "workyard-pi",
+		Host:      "workyard-pi",
+		User:      "dev",
 		Source:    "tailscale",
-		DNSName:   "jack-rasp-five.tail23881e.ts.net",
+		DNSName:   "workyard-pi.tailnet-example.ts.net",
 		UpdatedAt: time.Now().UTC(),
 	}}})
 	if err != nil {
@@ -127,14 +127,14 @@ func TestWorkerStoreMigratesLegacyJSONWhenYAMLMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workers) != 1 || workers[0].Name != "jack-rasp-five" {
+	if len(workers) != 1 || workers[0].Name != "workyard-pi" {
 		t.Fatalf("unexpected migrated workers: %#v", workers)
 	}
 	migrated, err := os.ReadFile(yamlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(migrated), "jack-rasp-five") || strings.Contains(string(migrated), "{") {
+	if !strings.Contains(string(migrated), "workyard-pi") || strings.Contains(string(migrated), "{") {
 		t.Fatalf("expected migrated YAML, got:\n%s", string(migrated))
 	}
 	if _, err := os.Stat(legacyPath); err != nil {

@@ -1,5 +1,33 @@
+# Build and release output
 dist/
 /workyard
+*.test
+coverage.out
+
+# Local runtime state
+.workyard/
+*.pid
+*.log
+
+# JavaScript/Bun/Next artifacts
+node_modules/
+.next/
+.turbo/
+.cache/
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local agent/editor instructions
 agents.md
 AGENTS.md
 claude.md

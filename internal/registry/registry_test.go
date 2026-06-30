@@ -9,11 +9,11 @@ import (
 func TestStoreUpsertPersistsAndReplacesRun(t *testing.T) {
 	store := New(filepath.Join(t.TempDir(), "runs.json"))
 	ref := RunRef{
-		Worker:           "jack@jack-rasp-five",
+		Worker:           "dev@workyard-pi",
 		Project:          "fixture",
 		RunID:            "run-1",
-		RemoteRunPath:    "/home/jack/.workyard/runs/fixture/run-1",
-		RemoteSourcePath: "/home/jack/.workyard/runs/fixture/run-1/source",
+		RemoteRunPath:    "/home/dev/.workyard/runs/fixture/run-1",
+		RemoteSourcePath: "/home/dev/.workyard/runs/fixture/run-1/source",
 	}
 	if err := store.Upsert(ref); err != nil {
 		t.Fatal(err)
@@ -30,7 +30,7 @@ func TestStoreUpsertPersistsAndReplacesRun(t *testing.T) {
 	}
 
 	time.Sleep(time.Millisecond)
-	ref.RemoteBinary = "/home/jack/.workyard/bin/workyard"
+	ref.RemoteBinary = "/home/dev/.workyard/bin/workyard"
 	if err := store.Upsert(ref); err != nil {
 		t.Fatal(err)
 	}
@@ -54,15 +54,15 @@ func TestStoreUpsertPersistsAndReplacesRun(t *testing.T) {
 
 func TestStoreRejectsInvalidRun(t *testing.T) {
 	store := New(filepath.Join(t.TempDir(), "runs.json"))
-	if err := store.Upsert(RunRef{Worker: "jack@pi", Project: "fixture\nx", RunID: "run-1"}); err == nil {
+	if err := store.Upsert(RunRef{Worker: "dev@pi", Project: "fixture\nx", RunID: "run-1"}); err == nil {
 		t.Fatal("expected invalid project to be rejected")
 	}
 }
 
 func TestStoreRemoveWorkerAndPrune(t *testing.T) {
 	store := New(filepath.Join(t.TempDir(), "runs.json"))
-	old := RunRef{Worker: "jack@pi", Project: "fixture", RunID: "old"}
-	fresh := RunRef{Worker: "jack@pi", Project: "fixture", RunID: "fresh"}
+	old := RunRef{Worker: "dev@pi", Project: "fixture", RunID: "old"}
+	fresh := RunRef{Worker: "dev@pi", Project: "fixture", RunID: "fresh"}
 	other := RunRef{Worker: "other", Project: "fixture", RunID: "fresh"}
 	for _, ref := range []RunRef{old, fresh, other} {
 		if err := store.Upsert(ref); err != nil {
@@ -90,7 +90,7 @@ func TestStoreRemoveWorkerAndPrune(t *testing.T) {
 	if len(removed) != 1 || removed[0].RunID != "old" {
 		t.Fatalf("unexpected pruned refs: %#v", removed)
 	}
-	count, err := store.RemoveWorker("jack@pi")
+	count, err := store.RemoveWorker("dev@pi")
 	if err != nil {
 		t.Fatal(err)
 	}

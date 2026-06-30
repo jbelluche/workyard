@@ -53,17 +53,17 @@ func TestWriteExcludeFileKeepsEnvExcludesByDefault(t *testing.T) {
 }
 
 func TestRemotePrepareScriptGuardsManagedSymlinks(t *testing.T) {
-	paths, err := remote.BuildPaths("/home/jack", "", "fixture", "run-1")
+	paths, err := remote.BuildPaths("/home/dev", "", "fixture", "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := remotePrepareScript(paths, "/home/jack/.workyard/bin")
+	script := remotePrepareScript(paths, "/home/dev/.workyard/bin")
 	for _, want := range []string{
 		"if [ -L \"$p\" ]",
 		"mkdir -p",
-		"/home/jack/.workyard/runs/fixture/run-1/source",
-		"/home/jack/.workyard/runs/fixture",
-		"/home/jack/.workyard/bin",
+		"/home/dev/.workyard/runs/fixture/run-1/source",
+		"/home/dev/.workyard/runs/fixture",
+		"/home/dev/.workyard/bin",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("prepare script missing %q:\n%s", want, script)

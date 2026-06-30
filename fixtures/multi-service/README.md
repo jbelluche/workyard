@@ -20,8 +20,8 @@ bun run check
 To exercise mirror as the remote development workflow, register two mirror records that point at separate remote destinations on the same worker:
 
 ```sh
-workyard mirror setup --local fixtures/multi-service --worker jack@jack-r5-16gb --remote-path /home/jack/.workyard/runs/mirrors/multi-service-a --name multi-service-a --yes
-workyard mirror setup --local fixtures/multi-service --worker jack@jack-r5-16gb --remote-path /home/jack/.workyard/runs/mirrors/multi-service-b --name multi-service-b --yes
+workyard mirror setup --local fixtures/multi-service --worker dev@linux-builder --remote-path /home/dev/.workyard/runs/mirrors/multi-service-a --name multi-service-a --yes
+workyard mirror setup --local fixtures/multi-service --worker dev@linux-builder --remote-path /home/dev/.workyard/runs/mirrors/multi-service-b --name multi-service-b --yes
 ```
 
 Then start each mirrored stack by ID:

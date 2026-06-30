@@ -34,10 +34,10 @@ func (f fakeRunner) Run(ctx context.Context, name string, args []string, timeout
 			command := args[len(args)-1]
 			switch {
 			case command == `printf '%s' "$HOME"`:
-				return CommandResult{Stdout: "/home/jack"}, nil
-			case strings.Contains(command, "/home/jack/.workyard/bin/workyard version --json"):
+				return CommandResult{Stdout: "/home/dev"}, nil
+			case strings.Contains(command, "/home/dev/.workyard/bin/workyard version --json"):
 				return CommandResult{Stdout: `{"ok":true,"version":"test"}`}, nil
-			case strings.Contains(command, "/home/jack/.workyard/bin/workyard daemonctl ping"):
+			case strings.Contains(command, "/home/dev/.workyard/bin/workyard daemonctl ping"):
 				return CommandResult{Stdout: `{"ok":true,"message":"pong"}`}, nil
 			case strings.Contains(command, "stat -c %a"):
 				return CommandResult{Stdout: "700\n"}, nil
@@ -51,7 +51,7 @@ func (f fakeRunner) Run(ctx context.Context, name string, args []string, timeout
 }
 
 func TestRunPassesRequiredChecks(t *testing.T) {
-	report := Run(context.Background(), Options{Version: "test", Worker: "jack@jack-rasp-five"}, passingRunner())
+	report := Run(context.Background(), Options{Version: "test", Worker: "dev@workyard-pi"}, passingRunner())
 	if !report.OK {
 		t.Fatalf("expected report to pass: %#v", report.Checks)
 	}
@@ -131,8 +131,8 @@ func passingRunner() fakeRunner {
 			"tailscale status --json": {
 				result: CommandResult{Stdout: `{"BackendState":"Running","Self":{"Online":true,"DNSName":"mac.tailnet.ts.net.","HostName":"mac","TailscaleIPs":["100.64.0.1"]}}`},
 			},
-			`ssh -o BatchMode=yes -- jack@jack-rasp-five printf '%s' "$HOME"`: {
-				result: CommandResult{Stdout: "/home/jack"},
+			`ssh -o BatchMode=yes -- dev@workyard-pi printf '%s' "$HOME"`: {
+				result: CommandResult{Stdout: "/home/dev"},
 			},
 		},
 	}

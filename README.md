@@ -11,10 +11,10 @@ Workyard does not guess where to run. Mirror records store the worker selected d
 
 ## Install
 
-For the current private repository, clone over SSH and run the local macOS installer:
+Clone the repository over HTTPS and run the local installer:
 
 ```sh
-git clone git@github.com:jbelluche/workyard.git
+git clone https://github.com/jackbelluche/workyard.git
 cd workyard
 scripts/local/install.sh
 ```
@@ -93,7 +93,7 @@ Register a reachable Tailscale/SSH worker:
 
 ```sh
 workyard workers discover
-workyard workers add jack-r5-16gb --user jack
+workyard workers add linux-builder --user dev
 ```
 
 Create a mirror for the current directory:
@@ -285,7 +285,7 @@ Workers can be discovered from Tailscale and registered locally before they have
 
 ```sh
 workyard workers discover
-workyard workers add jack-r5-16gb --user jack
+workyard workers add linux-builder --user dev
 workyard workers config show
 workyard workers list
 ```
@@ -294,23 +294,23 @@ Registered workers are stored in `~/.workyard/local/workers.yaml`. The normal ed
 
 ```yaml
 workers:
-  - name: jack-r5-16gb
-    host: jack-r5-16gb
-    user: jack
+  - name: linux-builder
+    host: linux-builder
+    user: dev
     source: tailscale
-    dnsName: jack-r5-16gb.tailnet.ts.net
+    dnsName: linux-builder.tailnet.ts.net
 ```
 
 Registered names can be used anywhere `--worker` is accepted:
 
 ```sh
-workyard deploy . --worker jack-r5-16gb --fresh
+workyard deploy . --worker linux-builder --fresh
 ```
 
 Bootstrap a reachable SSH machine as a Workyard-ready worker:
 
 ```sh
-workyard workers setup jack-r5-16gb --config workyard.bootstrap.yaml
+workyard workers setup linux-builder --config workyard.bootstrap.yaml
 ```
 
 The setup command can create private Workyard directories, repair `~/.workyard/runs` permissions, build and upload the correct worker binary, start or restart the worker daemon, optionally install apt packages or Docker, register the worker locally, and run a final worker doctor check.
@@ -321,10 +321,10 @@ Example `workyard.bootstrap.yaml`:
 version: 1
 
 workers:
-  jack-r5-16gb:
+  linux-builder:
     ssh:
-      user: jack
-      host: jack-r5-16gb
+      user: dev
+      host: linux-builder
 
     register: true
 
@@ -357,13 +357,13 @@ workers:
 Use `--dry-run` to review what setup would do without changing the worker:
 
 ```sh
-workyard workers setup jack-r5-16gb --config workyard.bootstrap.yaml --dry-run
+workyard workers setup linux-builder --config workyard.bootstrap.yaml --dry-run
 ```
 
 By default, setup uses non-interactive SSH and non-interactive `sudo -n`; if a privileged install needs a password, Workyard stops and prints the manual command to run on the worker. For trusted workers, you can opt into a local hidden sudo prompt:
 
 ```sh
-workyard workers setup jack-r5-16gb --config workyard.bootstrap.yaml --ask-sudo-password
+workyard workers setup linux-builder --config workyard.bootstrap.yaml --ask-sudo-password
 ```
 
 The password is sent over SSH stdin for the privileged setup commands and is not stored in the bootstrap config. Do not store passwords, Tailscale auth keys, or other secrets in `workyard.bootstrap.yaml`.
@@ -389,7 +389,7 @@ workyard runs list
 workyard runs remove user@worker-host my-project feature-branch
 workyard runs prune --older-than 168h
 workyard workers list
-workyard workers remove jack-r5-16gb
+workyard workers remove linux-builder
 ```
 
 Registry pruning only removes stale monitor entries. It does not delete remote run directories.
@@ -540,7 +540,7 @@ workyard mirror
 Foreground mirroring prints each sync:
 
 ```text
-synced workyard to jack-r5-16gb:/home/jack/workspace/workyard
+synced workyard to linux-builder:/home/dev/workspace/workyard
 ```
 
 Pass `--verbose` to include the itemized changed paths and transferred size. Press `Ctrl-C` to stop foreground mirroring. Start and stop background mirroring with:
@@ -684,7 +684,7 @@ manifest.json
 End-user install script, once releases are published from a public or otherwise accessible repository:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jbelluche/workyard/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jackbelluche/workyard/main/scripts/install.sh | sh
 ```
 
 Set `WORKYARD_REPO`, `WORKYARD_VERSION`, or `WORKYARD_INSTALL_DIR` before running the script when installing from a non-default release location. Homebrew formulas can reference the tarball URL and matching SHA-256 from `checksums.txt`.
@@ -769,11 +769,11 @@ Worker and monitor registry commands:
 
 ```sh
 workyard workers discover
-workyard workers add jack-r5-16gb --user jack
-workyard workers setup jack-r5-16gb --config workyard.bootstrap.yaml
+workyard workers add linux-builder --user dev
+workyard workers setup linux-builder --config workyard.bootstrap.yaml
 workyard workers config show
 workyard workers list
-workyard workers remove jack-r5-16gb
+workyard workers remove linux-builder
 workyard runs list
 workyard runs remove user@worker-host my-project feature-branch
 workyard runs prune --older-than 168h
@@ -811,6 +811,10 @@ Workyard is designed to stay private by default:
 - `.env` files are excluded from sync by default.
 - Runtime ports are injected into process environments instead of mutating `.env` files.
 - Worker paths are validated before running, syncing, reading logs, or deleting files.
+
+## License
+
+Workyard is released under the [MIT License](LICENSE).
 
 ## Development
 

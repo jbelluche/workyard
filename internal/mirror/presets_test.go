@@ -85,7 +85,7 @@ func TestWriteExcludeFileIncludesPresetExcludes(t *testing.T) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  root,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project",
 		Presets:    []string{"python"},
 	})

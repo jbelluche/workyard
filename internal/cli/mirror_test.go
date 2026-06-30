@@ -212,7 +212,7 @@ func TestMirrorTmuxListReportsNoMirrorsConfigured(t *testing.T) {
 func TestMirrorTmuxScriptsUseExactSessionTargets(t *testing.T) {
 	inspect := mirrorTmuxInspectScript("workyard-abc123")
 	kill := mirrorTmuxKillScript("workyard-abc123")
-	shell := mirrorTmuxShellScript("/home/jack/workspace/project", "workyard-abc123")
+	shell := mirrorTmuxShellScript("/home/dev/workspace/project", "workyard-abc123")
 	for name, script := range map[string]string{"inspect": inspect, "kill": kill, "shell": shell} {
 		if !strings.Contains(script, "target==workyard-abc123") && !strings.Contains(script, "target='=workyard-abc123'") {
 			t.Fatalf("%s script does not use exact target:\n%s", name, script)
@@ -257,7 +257,7 @@ func TestMirrorStartFailsWhenAllMirrorsPaused(t *testing.T) {
 		Name:       "project",
 		Enabled:    false,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project",
 	}); err != nil {
 		t.Fatal(err)
@@ -518,7 +518,7 @@ func TestMirrorServicesLogSelectionTreatsSingleArgAsServiceWithOneMirror(t *test
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project",
 	})
 	if err != nil {
@@ -549,11 +549,11 @@ func TestMirrorServicesLogSelectionRequiresTargetAfterMirrorID(t *testing.T) {
 }
 
 func TestRemoteDaemonArgvControlsJSONMode(t *testing.T) {
-	opts := &options{worker: "jack@worker"}
+	opts := &options{worker: "dev@worker"}
 	paths := remote.Paths{
-		Binary:  "/home/jack/.workyard/bin/workyard",
-		Socket:  "/home/jack/.workyard/daemon/workyard.sock",
-		RunRoot: "/home/jack/.workyard/runs/project/run",
+		Binary:  "/home/dev/.workyard/bin/workyard",
+		Socket:  "/home/dev/.workyard/daemon/workyard.sock",
+		RunRoot: "/home/dev/.workyard/runs/project/run",
 		Project: "project",
 		RunID:   "run",
 	}
@@ -599,7 +599,7 @@ func writeMirrorConflictRegistry(t *testing.T) (string, string) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project-a",
 	})
 	if err != nil {
@@ -609,7 +609,7 @@ func writeMirrorConflictRegistry(t *testing.T) (string, string) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project-b",
 	}); err != nil {
 		t.Fatal(err)

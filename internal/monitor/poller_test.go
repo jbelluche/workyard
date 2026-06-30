@@ -33,15 +33,15 @@ func (f fakeFetcher) Fetch(ctx context.Context, ref registry.RunRef) (runData, e
 func TestPollerRefreshAggregatesWorkerRunAndService(t *testing.T) {
 	now := time.Now().UTC()
 	reg := fakeRegistry{refs: []registry.RunRef{{
-		Worker:        "jack@jack-rasp-five",
+		Worker:        "dev@workyard-pi",
 		Project:       "fixture",
 		RunID:         "run-1",
-		RemoteRunPath: "/home/jack/.workyard/runs/fixture/run-1",
+		RemoteRunPath: "/home/dev/.workyard/runs/fixture/run-1",
 	}}}
 	fetch := fakeFetcher{data: runData{
 		Response: worker.Response{
 			OK:      true,
-			Worker:  "jack@jack-rasp-five",
+			Worker:  "dev@workyard-pi",
 			Project: "fixture",
 			RunID:   "run-1",
 			Services: []worker.ServiceState{{
@@ -50,7 +50,7 @@ func TestPollerRefreshAggregatesWorkerRunAndService(t *testing.T) {
 				Healthy:      true,
 				PID:          1234,
 				AssignedPort: 3100,
-				URL:          "http://jack-rasp-five:3100",
+				URL:          "http://workyard-pi:3100",
 				StartedAt:    now,
 			}},
 		},
@@ -71,11 +71,11 @@ func TestPollerRefreshAggregatesWorkerRunAndService(t *testing.T) {
 }
 
 func TestPollerStripsInspectOnlyErrorFields(t *testing.T) {
-	reg := fakeRegistry{refs: []registry.RunRef{{Worker: "jack@jack-rasp-five", Project: "fixture", RunID: "run-1"}}}
+	reg := fakeRegistry{refs: []registry.RunRef{{Worker: "dev@workyard-pi", Project: "fixture", RunID: "run-1"}}}
 	fetch := fakeFetcher{data: runData{
 		Response: worker.Response{
 			OK:      true,
-			Worker:  "jack@jack-rasp-five",
+			Worker:  "dev@workyard-pi",
 			Project: "fixture",
 			RunID:   "run-1",
 			Services: []worker.ServiceState{{

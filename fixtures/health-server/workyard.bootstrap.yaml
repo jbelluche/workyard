@@ -1,10 +1,10 @@
 version: 1
 
 workers:
-  jack-rasp-five:
+  workyard-pi:
     ssh:
-      user: jack
-      host: jack-rasp-five
+      user: dev
+      host: workyard-pi
 
     register: true
 

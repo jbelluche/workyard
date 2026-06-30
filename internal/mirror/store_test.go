@@ -18,7 +18,7 @@ func TestStoreUpsertListDelete(t *testing.T) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project",
 		Delete:     true,
 		IncludeGit: true,
@@ -63,7 +63,7 @@ func TestResolveAllowsUniqueNameAndRequiresIDForNameCollision(t *testing.T) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project-a",
 	})
 	if err != nil {
@@ -73,7 +73,7 @@ func TestResolveAllowsUniqueNameAndRequiresIDForNameCollision(t *testing.T) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project-b",
 	})
 	if err != nil {
@@ -83,7 +83,7 @@ func TestResolveAllowsUniqueNameAndRequiresIDForNameCollision(t *testing.T) {
 		Name:       "other",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/other",
 	})
 	if err != nil {
@@ -128,7 +128,7 @@ func TestSetEnabledUsesNameOnlyWhenUnambiguous(t *testing.T) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project",
 	})
 	if err != nil {
@@ -151,19 +151,19 @@ func TestSetEnabledUsesNameOnlyWhenUnambiguous(t *testing.T) {
 }
 
 func TestDefaultRemotePathUsesWorkspaceBasename(t *testing.T) {
-	got := DefaultRemotePath("/Users/jack/workspace/workyard")
+	got := DefaultRemotePath("/Users/dev/workspace/workyard")
 	if got != "~/workspace/workyard" {
 		t.Fatalf("remote path=%q", got)
 	}
 }
 
 func TestValidateResolvedRemotePathRejectsBroadPaths(t *testing.T) {
-	for _, path := range []string{"/", "/home/jack", "/tmp/x"} {
-		if err := ValidateResolvedRemotePath("/home/jack", path); err == nil {
+	for _, path := range []string{"/", "/home/dev", "/tmp/x"} {
+		if err := ValidateResolvedRemotePath("/home/dev", path); err == nil {
 			t.Fatalf("expected %q to be rejected", path)
 		}
 	}
-	if err := ValidateResolvedRemotePath("/home/jack", "/home/jack/workspace/workyard"); err != nil {
+	if err := ValidateResolvedRemotePath("/home/dev", "/home/dev/workspace/workyard"); err != nil {
 		t.Fatalf("expected workspace path to be accepted: %v", err)
 	}
 }
@@ -178,7 +178,7 @@ func TestWriteExcludeFileHonorsIncludeGit(t *testing.T) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project",
 		IncludeGit: true,
 	})
@@ -201,7 +201,7 @@ func TestWriteExcludeFileHonorsIncludeGit(t *testing.T) {
 		Name:       "project",
 		Enabled:    true,
 		LocalRoot:  local,
-		Worker:     "jack@jack-r5-16gb",
+		Worker:     "dev@linux-builder",
 		RemotePath: "~/workspace/project",
 		IncludeGit: false,
 	})

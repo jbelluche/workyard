@@ -14,14 +14,14 @@ import (
 func TestResolveWorkerFromConfig(t *testing.T) {
 	cfg := Config{Workers: map[string]WorkerSpec{
 		"pi": {
-			SSH: SSHSpec{User: "jack", Host: "jack-r5-16gb"},
+			SSH: SSHSpec{User: "dev", Host: "linux-builder"},
 		},
 	}}
 	resolved, err := ResolveWorker("pi", cfg, filepath.Join(t.TempDir(), "workers.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Name != "pi" || resolved.Target != "jack@jack-r5-16gb" || resolved.Source != "config" {
+	if resolved.Name != "pi" || resolved.Target != "dev@linux-builder" || resolved.Source != "config" {
 		t.Fatalf("unexpected resolved worker: %#v", resolved)
 	}
 }
@@ -29,14 +29,14 @@ func TestResolveWorkerFromConfig(t *testing.T) {
 func TestResolveWorkerFromRegistry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "workers.yaml")
 	store := registry.NewWorkerStore(path)
-	if err := store.Upsert(registry.WorkerConfig{Name: "pi", Host: "jack-r5-16gb", User: "jack"}); err != nil {
+	if err := store.Upsert(registry.WorkerConfig{Name: "pi", Host: "linux-builder", User: "dev"}); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := ResolveWorker("pi", Config{}, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Name != "pi" || resolved.Target != "jack@jack-r5-16gb" || resolved.Source != "registry" {
+	if resolved.Name != "pi" || resolved.Target != "dev@linux-builder" || resolved.Source != "registry" {
 		t.Fatalf("unexpected resolved worker: %#v", resolved)
 	}
 }
@@ -48,8 +48,8 @@ version: 1
 workers:
   pi:
     ssh:
-      user: jack
-      host: jack-r5-16gb
+      user: dev
+      host: linux-builder
     packages:
       install: true
       apt:
@@ -183,14 +183,14 @@ func TestRegisterWorkerPreservesExistingTailscaleMetadata(t *testing.T) {
 	if err := store.Upsert(registry.WorkerConfig{
 		Name:         "pi",
 		Host:         "pi",
-		User:         "jack",
+		User:         "dev",
 		Source:       "tailscale",
 		DNSName:      "pi.tailnet.ts.net",
 		TailscaleIPs: []string{"100.64.0.10"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	err := registerWorker(stateDir, resolvedWorker{Name: "pi", Host: "pi", User: "jack", Target: "jack@pi"})
+	err := registerWorker(stateDir, resolvedWorker{Name: "pi", Host: "pi", User: "dev", Target: "dev@pi"})
 	if err != nil {
 		t.Fatal(err)
 	}

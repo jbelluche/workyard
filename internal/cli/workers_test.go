@@ -12,12 +12,12 @@ import (
 
 func TestMergeWorkerDiscoveryMarksTrackedAndUntrackedDevices(t *testing.T) {
 	devices := []tailscaleDevice{
-		{Name: "jack-r5-16gb", Host: "jack-r5-16gb", DNSName: "jack-r5-16gb.tailnet.ts.net", Online: true, TailscaleIPs: []string{"100.64.0.10"}},
+		{Name: "linux-builder", Host: "linux-builder", DNSName: "linux-builder.tailnet.ts.net", Online: true, TailscaleIPs: []string{"100.64.0.10"}},
 		{Name: "other", Host: "other", DNSName: "other.tailnet.ts.net", Online: false},
 	}
 	registered := []registry.WorkerConfig{
-		{Name: "jack-r5-16gb", Host: "jack-r5-16gb", User: "jack", Source: "tailscale"},
-		{Name: "old-worker", Host: "old-worker", User: "jack", Source: "manual"},
+		{Name: "linux-builder", Host: "linux-builder", User: "dev", Source: "tailscale"},
+		{Name: "old-worker", Host: "old-worker", User: "dev", Source: "manual"},
 	}
 	rows := mergeWorkerDiscovery(devices, registered)
 	if len(rows) != 3 {
@@ -27,7 +27,7 @@ func TestMergeWorkerDiscoveryMarksTrackedAndUntrackedDevices(t *testing.T) {
 	for _, row := range rows {
 		byName[row.Name] = row
 	}
-	if row := byName["jack-r5-16gb"]; !row.Tracked || row.SSHTarget != "jack@jack-r5-16gb" || !row.Online {
+	if row := byName["linux-builder"]; !row.Tracked || row.SSHTarget != "dev@linux-builder" || !row.Online {
 		t.Fatalf("unexpected tracked row: %#v", row)
 	}
 	if row := byName["other"]; row.Tracked || row.Online {
@@ -39,12 +39,12 @@ func TestMergeWorkerDiscoveryMarksTrackedAndUntrackedDevices(t *testing.T) {
 }
 
 func TestWorkerKeysMatchShortDNSAndSSHTargetHost(t *testing.T) {
-	keys := workerKeys("jack@jack-r5-16gb", "jack-r5-16gb.tailnet.ts.net.")
+	keys := workerKeys("dev@linux-builder", "linux-builder.tailnet.ts.net.")
 	seen := map[string]bool{}
 	for _, key := range keys {
 		seen[key] = true
 	}
-	for _, want := range []string{"jack-r5-16gb", "jack-r5-16gb.tailnet.ts.net"} {
+	for _, want := range []string{"linux-builder", "linux-builder.tailnet.ts.net"} {
 		if !seen[want] {
 			t.Fatalf("missing key %q from %#v", want, keys)
 		}
@@ -53,12 +53,12 @@ func TestWorkerKeysMatchShortDNSAndSSHTargetHost(t *testing.T) {
 
 func TestTailscaleDeviceFromPeerUsesHostName(t *testing.T) {
 	device := tailscaleDeviceFromPeer(tailscalePeerStatus{
-		DNSName:      "jack-r5-16gb.tailnet.ts.net.",
-		HostName:     "jack-r5-16gb",
+		DNSName:      "linux-builder.tailnet.ts.net.",
+		HostName:     "linux-builder",
 		Online:       true,
 		TailscaleIPs: []string{"100.64.0.10"},
 	}, false)
-	if device.Name != "jack-r5-16gb" || device.Host != "jack-r5-16gb" || device.DNSName != "jack-r5-16gb.tailnet.ts.net" {
+	if device.Name != "linux-builder" || device.Host != "linux-builder" || device.DNSName != "linux-builder.tailnet.ts.net" {
 		t.Fatalf("unexpected device: %#v", device)
 	}
 }
@@ -108,7 +108,7 @@ func TestWorkerRequiredHintListsRegisteredWorkers(t *testing.T) {
 	stateDir := t.TempDir()
 	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
 	for _, name := range []string{"pi", "r5"} {
-		if err := store.Upsert(registry.WorkerConfig{Name: name, Host: name, User: "jack"}); err != nil {
+		if err := store.Upsert(registry.WorkerConfig{Name: name, Host: name, User: "dev"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -130,7 +130,7 @@ func TestWorkerRequiredHintListsRegisteredWorkers(t *testing.T) {
 func TestWorkerCompletionsIncludeLocalhostAndRegisteredNames(t *testing.T) {
 	stateDir := t.TempDir()
 	store := registry.NewWorkerStore(registry.DefaultWorkersPath(stateDir))
-	if err := store.Upsert(registry.WorkerConfig{Name: "pi", Host: "pi", User: "jack"}); err != nil {
+	if err := store.Upsert(registry.WorkerConfig{Name: "pi", Host: "pi", User: "dev"}); err != nil {
 		t.Fatal(err)
 	}
 	got := workerCompletions(stateDir)

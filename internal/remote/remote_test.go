@@ -9,23 +9,23 @@ import (
 )
 
 func TestBuildPathsRejectsRemoteRootOutsideWorkyardRuns(t *testing.T) {
-	if _, err := BuildPaths("/home/jack", "/tmp/workyard", "project", "run"); err == nil {
+	if _, err := BuildPaths("/home/dev", "/tmp/workyard", "project", "run"); err == nil {
 		t.Fatal("expected outside remote root to be rejected")
 	}
 }
 
 func TestBuildPathsDefault(t *testing.T) {
-	paths, err := BuildPaths("/home/jack", "", "my project", "feature-1")
+	paths, err := BuildPaths("/home/dev", "", "my project", "feature-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paths.Source != "/home/jack/.workyard/runs/my-project/feature-1/source" {
+	if paths.Source != "/home/dev/.workyard/runs/my-project/feature-1/source" {
 		t.Fatalf("unexpected source path %s", paths.Source)
 	}
 }
 
 func TestValidateWorkerAcceptsNormalTargets(t *testing.T) {
-	for _, worker := range []string{"jack@jack-rasp-five", "jack-rasp-five", "pi_01"} {
+	for _, worker := range []string{"dev@workyard-pi", "workyard-pi", "pi_01"} {
 		if err := ValidateWorker(worker); err != nil {
 			t.Fatalf("expected %q to be accepted: %v", worker, err)
 		}
@@ -35,10 +35,10 @@ func TestValidateWorkerAcceptsNormalTargets(t *testing.T) {
 func TestValidateWorkerRejectsOptionAndShellLikeTargets(t *testing.T) {
 	for _, worker := range []string{
 		"-oProxyCommand=sh",
-		"jack@host:/tmp",
-		"jack@host name",
-		"jack@host;touch /tmp/pwned",
-		"jack@host\nwhoami",
+		"dev@host:/tmp",
+		"dev@host name",
+		"dev@host;touch /tmp/pwned",
+		"dev@host\nwhoami",
 	} {
 		if err := ValidateWorker(worker); err == nil {
 			t.Fatalf("expected %q to be rejected", worker)
@@ -96,41 +96,41 @@ func TestArtifactFreshTracksWorkyardSourceFiles(t *testing.T) {
 }
 
 func TestInstallDestinationStaysUnderWorkyardBin(t *testing.T) {
-	dest, err := installDestination("/home/jack", "")
+	dest, err := installDestination("/home/dev", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dest != "/home/jack/.workyard/bin/workyard" {
+	if dest != "/home/dev/.workyard/bin/workyard" {
 		t.Fatalf("dest=%s", dest)
 	}
-	if _, err := installDestination("/home/jack", "/tmp/workyard"); err == nil {
+	if _, err := installDestination("/home/dev", "/tmp/workyard"); err == nil {
 		t.Fatal("expected outside install destination to be rejected")
 	}
 }
 
 func TestDaemonPathsUseWorkyardDaemonAndInstalledBinary(t *testing.T) {
-	paths, err := DaemonPaths("/home/jack", "")
+	paths, err := DaemonPaths("/home/dev", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paths.Socket != "/home/jack/.workyard/daemon/workyard.sock" {
+	if paths.Socket != "/home/dev/.workyard/daemon/workyard.sock" {
 		t.Fatalf("socket=%s", paths.Socket)
 	}
-	if paths.Binary != "/home/jack/.workyard/bin/workyard" {
+	if paths.Binary != "/home/dev/.workyard/bin/workyard" {
 		t.Fatalf("binary=%s", paths.Binary)
 	}
 }
 
 func TestDaemonPathsRejectBinaryOutsideWorkyardBin(t *testing.T) {
-	if _, err := DaemonPaths("/home/jack", "/tmp/workyard"); err == nil {
+	if _, err := DaemonPaths("/home/dev", "/tmp/workyard"); err == nil {
 		t.Fatal("expected outside daemon binary to be rejected")
 	}
 }
 
 func TestForceStopDaemonScriptUsesLockAndSocketGuards(t *testing.T) {
 	paths := Paths{
-		DaemonDir: "/home/jack/.workyard/daemon",
-		Socket:    "/home/jack/.workyard/daemon/workyard.sock",
+		DaemonDir: "/home/dev/.workyard/daemon",
+		Socket:    "/home/dev/.workyard/daemon/workyard.sock",
 	}
 	script := forceStopDaemonScript(paths)
 	for _, want := range []string{
@@ -149,7 +149,7 @@ func TestForceStopDaemonScriptUsesLockAndSocketGuards(t *testing.T) {
 }
 
 func TestValidateManagedRunRejectsOutsidePaths(t *testing.T) {
-	paths, err := BuildPaths("/home/jack", "", "fixture", "run-1")
+	paths, err := BuildPaths("/home/dev", "", "fixture", "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestValidateManagedRunRejectsOutsidePaths(t *testing.T) {
 }
 
 func TestBuildLocalPathsUsesStateDir(t *testing.T) {
-	paths, err := BuildLocalPaths("/home/jack", "/tmp/custom-state", "", "fixture", "run-1")
+	paths, err := BuildLocalPaths("/home/dev", "/tmp/custom-state", "", "fixture", "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,23 +179,23 @@ func TestBuildLocalPathsUsesStateDir(t *testing.T) {
 }
 
 func TestBuildLocalPathsDefaultsToHomeWorkyard(t *testing.T) {
-	paths, err := BuildLocalPaths("/home/jack", "", "", "fixture", "run-1")
+	paths, err := BuildLocalPaths("/home/dev", "", "", "fixture", "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paths.RunRoot != "/home/jack/.workyard/runs/fixture/run-1" {
+	if paths.RunRoot != "/home/dev/.workyard/runs/fixture/run-1" {
 		t.Fatalf("runRoot=%q", paths.RunRoot)
 	}
-	if paths.StateDir != "/home/jack/.workyard" {
+	if paths.StateDir != "/home/dev/.workyard" {
 		t.Fatalf("stateDir=%q", paths.StateDir)
 	}
 }
 
 func TestBuildLocalPathsRejectsRemoteRootOutsideStateDir(t *testing.T) {
-	if _, err := BuildLocalPaths("/home/jack", "/tmp/custom-state", "/home/jack/.workyard/runs", "fixture", "run-1"); err == nil {
+	if _, err := BuildLocalPaths("/home/dev", "/tmp/custom-state", "/home/dev/.workyard/runs", "fixture", "run-1"); err == nil {
 		t.Fatal("expected remote root outside the state dir runs root to be rejected")
 	}
-	if _, err := BuildLocalPaths("/home/jack", "/tmp/custom-state", "/tmp/custom-state/runs", "fixture", "run-1"); err != nil {
+	if _, err := BuildLocalPaths("/home/dev", "/tmp/custom-state", "/tmp/custom-state/runs", "fixture", "run-1"); err != nil {
 		t.Fatalf("expected remote root under the state dir to be accepted: %v", err)
 	}
 }
