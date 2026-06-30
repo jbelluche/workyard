@@ -894,6 +894,14 @@ Run tests:
 go test ./...
 ```
 
+This includes binary-level local integration tests. Remote Raspberry Pi tests are opt-in:
+
+```sh
+WORKYARD_REMOTE_INTEGRATION=1 go test ./integration/remote -count=1
+```
+
+See [docs/testing.md](docs/testing.md) for the full local and remote test layout.
+
 Run vet:
 
 ```sh
